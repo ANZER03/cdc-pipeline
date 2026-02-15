@@ -3,7 +3,7 @@ import os
 
 
 def test_connectors():
-    # Initialize Spark Session with Iceberg configurations
+    # Initialize Spark Session with Iceberg and S3A configurations
     spark = (
         SparkSession.builder.appName("ConnectorTest")
         .config(
@@ -13,6 +13,13 @@ def test_connectors():
         .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.local.type", "hadoop")
         .config("spark.sql.catalog.local.warehouse", "/tmp/iceberg-warehouse")
+        # S3A / MinIO Configurations
+        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
+        .config("spark.hadoop.fs.s3a.access.key", "minioadmin")
+        .config("spark.hadoop.fs.s3a.secret.key", "minioadmin")
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         .getOrCreate()
     )
 
@@ -31,8 +38,6 @@ def test_connectors():
     # 2. Test Kafka Connector (Production and Consumption)
     print("Testing Kafka Connector Production...")
     try:
-        # Create a simple dataframe to write to Kafka
-        # Kafka expects 'key' and 'value' columns (both string or binary)
         data = [("1", "hello kafka from spark")]
         df_to_kafka = spark.createDataFrame(data, ["key", "value"])
 
@@ -50,7 +55,6 @@ def test_connectors():
             .load()
         )
 
-        # Show the data (it will have key, value, topic, partition, offset, timestamp, timestampType)
         print("--- KAFKA DATA START ---")
         df_from_kafka.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)").show()
         print("--- KAFKA DATA END ---")
@@ -58,6 +62,26 @@ def test_connectors():
 
     except Exception as e:
         print(f"Kafka test failed: {str(e)}")
+        raise e
+
+    # 3. Test MinIO (S3A)
+    print("Testing MinIO (S3A) Integration...")
+    try:
+        s3_path = "s3a://spark-test/test-file.parquet"
+        data_s3 = [("s3", "minio integration works")]
+        df_s3 = spark.createDataFrame(data_s3, ["source", "status"])
+
+        print(f"Attempting to write to {s3_path}...")
+        df_s3.write.mode("overwrite").parquet(s3_path)
+        print("Write to MinIO successful.")
+
+        print("Attempting to read from MinIO...")
+        df_read_s3 = spark.read.parquet(s3_path)
+        df_read_s3.show()
+        print("MinIO integration test passed.")
+
+    except Exception as e:
+        print(f"MinIO test failed: {str(e)}")
         raise e
 
     spark.stop()

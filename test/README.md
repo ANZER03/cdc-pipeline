@@ -7,20 +7,19 @@ This project provides a custom Spark Docker image pre-configured with Apache Ice
 - **Scala Version**: `2.12`
 - **Connectors Included**:
     - **Iceberg**: `iceberg-spark-runtime-3.5_2.12:1.7.1`
-    - **Kafka**: `spark-sql-kafka-0-10_2.12:3.5.3` (plus dependencies: `kafka-clients`, `commons-pool2`, `spark-token-provider-kafka`)
+    - **Kafka**: `spark-sql-kafka-0-10_2.12:3.5.3`
+    - **MinIO/S3**: `hadoop-aws:3.3.4` and `aws-java-sdk-bundle:1.12.262`
 
-## 2. Infrastructure (KRaft Mode)
-The setup uses **Kafka KRaft mode**, eliminating the need for ZooKeeper. 
-- **Image**: `confluentinc/cp-kafka:7.7.7`
-- **Node ID**: 1 (combined Broker & Controller)
-- **Cluster ID**: `MkU3OEVBNTcwNTJENDM2Qk`
+## 2. Infrastructure
+The setup uses a multi-container orchestration:
+- **Kafka**: KRaft mode (`confluentinc/cp-kafka:7.7.7`).
+- **MinIO**: Object storage for S3A testing (`minio/minio:latest`).
 
 ## 3. Verification Test
 The `test_connectors.py` script performs end-to-end checks:
-1.  **Iceberg**: Creates a Hadoop-catalog based table (`local.db.test_table`), inserts a record, and verifies the read.
-2.  **Kafka**: 
-    - **Production**: Writes a sample DataFrame with `key` and `value` columns to a Kafka topic (`test-topic`).
-    - **Consumption**: Reads the data back from the same topic using the Spark Kafka connector and displays the result.
+1.  **Iceberg**: Creates a Hadoop-catalog based table, inserts a record, and verifies the read.
+2.  **Kafka**: Produces a sample record to `test-topic` and consumes it back.
+3.  **MinIO (S3A)**: Writes a Parquet file to `s3a://spark-test/` and reads it back.
 
 ## 4. How to Run
 
@@ -30,9 +29,19 @@ docker build -t custom-spark:latest ./test
 ```
 
 ### Run the Integration Test
+1. Start infrastructure:
 ```bash
 cd test
-docker compose up --abort-on-container-exit
+docker compose up -d kafka minio
+```
+2. Create the test bucket:
+```bash
+docker run --rm --network test_default minio/mc alias set myminio http://minio:9000 minioadmin minioadmin
+docker run --rm --network test_default minio/mc mb myminio/spark-test
+```
+3. Run the Spark job:
+```bash
+docker compose up spark --abort-on-container-exit
 ```
 
 ## 5. Clean up

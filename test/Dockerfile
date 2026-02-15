@@ -24,6 +24,16 @@ RUN curl -s https://repo1.maven.org/maven2/org/apache/spark/spark-sql-kafka-0-10
     curl -s https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar \
     -o /opt/spark/jars/commons-pool2-2.11.1.jar
 
+# Download MinIO/S3 Connectors (Hadoop AWS and AWS SDK)
+ENV HADOOP_VERSION=3.3.4
+ENV AWS_SDK_VERSION=1.12.262
+
+RUN curl -s https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_VERSION}/hadoop-aws-${HADOOP_VERSION}.jar \
+    -o /opt/spark/jars/hadoop-aws-${HADOOP_VERSION}.jar && \
+    curl -s https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar \
+    -o /opt/spark/jars/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar
+
 WORKDIR /opt/spark
+
 
 USER spark
