@@ -38,6 +38,18 @@ services:
       timeout: 10s
       retries: 5
 
+  mc:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb myminio/spark-test || true;
+      exit 0;
+      "
+
   spark:
     image: custom-spark:latest
     volumes:
@@ -48,6 +60,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      mc:
+        condition: service_completed_successfully
     environment:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin

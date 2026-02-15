@@ -13,6 +13,10 @@ def test_connectors():
         .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.local.type", "hadoop")
         .config("spark.sql.catalog.local.warehouse", "/tmp/iceberg-warehouse")
+        # Lakehouse Catalog (Iceberg on MinIO)
+        .config("spark.sql.catalog.lakehouse", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.lakehouse.type", "hadoop")
+        .config("spark.sql.catalog.lakehouse.warehouse", "s3a://spark-test/lakehouse")
         # S3A / MinIO Configurations
         .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
         .config("spark.hadoop.fs.s3a.access.key", "minioadmin")
@@ -82,6 +86,24 @@ def test_connectors():
 
     except Exception as e:
         print(f"MinIO test failed: {str(e)}")
+        raise e
+
+    # 4. Lakehouse Test (Iceberg on MinIO)
+    print("Testing Lakehouse Architecture (Iceberg on MinIO)...")
+    try:
+        spark.sql(
+            "CREATE TABLE IF NOT EXISTS lakehouse.db.lakehouse_table (id bigint, data string, source string) USING iceberg"
+        )
+        spark.sql(
+            "INSERT INTO lakehouse.db.lakehouse_table VALUES (1, 'lakehouse works', 'minio')"
+        )
+        print("Write to Iceberg table in MinIO successful.")
+
+        df_lakehouse = spark.table("lakehouse.db.lakehouse_table")
+        df_lakehouse.show()
+        print("Lakehouse integration test passed.")
+    except Exception as e:
+        print(f"Lakehouse test failed: {str(e)}")
         raise e
 
     spark.stop()
