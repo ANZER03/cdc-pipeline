@@ -20,6 +20,7 @@ The `test_connectors.py` script performs end-to-end checks:
 1.  **Iceberg**: Creates a Hadoop-catalog based table, inserts a record, and verifies the read.
 2.  **Kafka**: Produces a sample record to `test-topic` and consumes it back.
 3.  **MinIO (S3A)**: Writes a Parquet file to `s3a://spark-test/` and reads it back.
+4.  **Iceberg on MinIO**: (via `test_iceberg_minio.py`) Specifically verifies writing Iceberg tables directly to the MinIO bucket.
 
 ## 4. How to Run
 
@@ -39,9 +40,17 @@ docker compose up -d kafka minio
 docker run --rm --network test_default minio/mc alias set myminio http://minio:9000 minioadmin minioadmin
 docker run --rm --network test_default minio/mc mb myminio/spark-test
 ```
-3. Run the Spark job:
+3. Run the complete connector test:
 ```bash
 docker compose up spark --abort-on-container-exit
+```
+
+4. Run the specific Iceberg-MinIO write test:
+```bash
+docker run --rm --network test_default \
+  -v $(pwd)/test/test_iceberg_minio.py:/test/test_iceberg_minio.py \
+  custom-spark:latest \
+  /opt/spark/bin/spark-submit /test/test_iceberg_minio.py
 ```
 
 ## 5. Clean up
