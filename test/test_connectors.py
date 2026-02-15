@@ -28,27 +28,37 @@ def test_connectors():
     df_iceberg.show()
     print("Iceberg test passed.")
 
-    # 2. Test Kafka Connector (loading check)
-    print("Testing Kafka Connector loading...")
+    # 2. Test Kafka Connector (Production and Consumption)
+    print("Testing Kafka Connector Production...")
     try:
-        # We don't necessarily need a running Kafka to check if the format is recognized
-        # But we'll try to define a read stream from a dummy bootstrap server
-        df_kafka = (
-            spark.readStream.format("kafka")
+        # Create a simple dataframe to write to Kafka
+        # Kafka expects 'key' and 'value' columns (both string or binary)
+        data = [("1", "hello kafka from spark")]
+        df_to_kafka = spark.createDataFrame(data, ["key", "value"])
+
+        df_to_kafka.write.format("kafka").option(
+            "kafka.bootstrap.servers", "kafka:9092"
+        ).option("topic", "test-topic").save()
+        print("Kafka production successful.")
+
+        print("Testing Kafka Connector Consumption...")
+        df_from_kafka = (
+            spark.read.format("kafka")
             .option("kafka.bootstrap.servers", "kafka:9092")
             .option("subscribe", "test-topic")
+            .option("startingOffsets", "earliest")
             .load()
         )
-        print("Kafka connector loaded successfully (format 'kafka' recognized).")
+
+        # Show the data (it will have key, value, topic, partition, offset, timestamp, timestampType)
+        print("--- KAFKA DATA START ---")
+        df_from_kafka.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)").show()
+        print("--- KAFKA DATA END ---")
+        print("Kafka consumption successful.")
+
     except Exception as e:
-        if "Failed to find data source: kafka" in str(e):
-            print("Kafka connector NOT found.")
-            raise e
-        else:
-            # It might fail because localhost:9092 is not reachable, but that means the connector IS loaded
-            print(
-                f"Kafka connector format recognized. (Note: connection might fail as expected: {str(e)[:100]}...)"
-            )
+        print(f"Kafka test failed: {str(e)}")
+        raise e
 
     spark.stop()
 
