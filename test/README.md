@@ -16,9 +16,11 @@ The setup uses **Kafka KRaft mode**, eliminating the need for ZooKeeper.
 - **Cluster ID**: `MkU3OEVBNTcwNTJENDM2Qk`
 
 ## 3. Verification Test
-The `test_connectors.py` script performs two primary checks:
-1.  **Iceberg**: Creates a Hadoop-catalog based table, inserts a record, and verifies the read.
-2.  **Kafka**: Validates that the Spark session correctly recognizes the `kafka` format by attempting to initialize a read stream.
+The `test_connectors.py` script performs end-to-end checks:
+1.  **Iceberg**: Creates a Hadoop-catalog based table (`local.db.test_table`), inserts a record, and verifies the read.
+2.  **Kafka**: 
+    - **Production**: Writes a sample DataFrame with `key` and `value` columns to a Kafka topic (`test-topic`).
+    - **Consumption**: Reads the data back from the same topic using the Spark Kafka connector and displays the result.
 
 ## 4. How to Run
 
