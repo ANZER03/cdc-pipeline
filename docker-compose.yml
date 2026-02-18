@@ -24,6 +24,7 @@ networks:
 
 volumes:
   kafka-data:
+  kafka-2-data:
   postgres-data:
   redis-data:
   minio-data:
@@ -31,7 +32,7 @@ volumes:
 services:
 
   # =========================================================================
-  # Kafka Broker (KRaft Mode — No Zookeeper)
+  # Kafka Broker 1 (KRaft Mode — No Zookeeper)
   # =========================================================================
   kafka:
     image: confluentinc/cp-kafka:7.7.7
@@ -44,7 +45,7 @@ services:
       # --- KRaft Configuration ---
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093,2@kafka-2:29093'
       CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
 
       # --- Listeners ---
@@ -69,6 +70,50 @@ services:
       - ebap-net
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # Kafka Broker 2 (KRaft Mode — Cluster Test Node)
+  # =========================================================================
+  kafka-2:
+    image: confluentinc/cp-kafka:7.7.7
+    container_name: ebap-kafka-2
+    hostname: kafka-2
+    ports:
+      - "9093:9092"       # External access (host machine)
+      - "29094:29092"     # Internal access (containers)
+    environment:
+      # --- KRaft Configuration ---
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093,2@kafka-2:29093'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+      # --- Listeners ---
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-2:9092,PLAINTEXT_HOST://localhost:29094'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      # --- Topic Defaults ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # --- Log Retention ---
+      KAFKA_LOG_RETENTION_HOURS: 168           # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824      # 1 GB segments
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-2:9092 --list"]
       interval: 5s
       timeout: 10s
       retries: 10
