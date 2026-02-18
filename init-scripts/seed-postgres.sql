@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at  TIMESTAMP    NOT NULL DEFAULT NOW()
 );
 
+-- Enable full row logging in WAL so Debezium populates the "before" field
+-- on UPDATE and DELETE events (default REPLICA IDENTITY only includes PK).
+ALTER TABLE users REPLICA IDENTITY FULL;
+
 -- Insert seed data
 INSERT INTO users (user_id, username, email, tier, region) VALUES
     ('usr_001', 'alice_wonder',   'alice@example.com',   'premium',    'us-east-1'),
