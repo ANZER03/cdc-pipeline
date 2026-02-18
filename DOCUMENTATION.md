@@ -63,7 +63,33 @@ curl -i -X POST -H "Accept:application/json" -H "Content-Type:application/json" 
 
 ---
 
-## CDC Data Quality
+## Spark & Iceberg Integration (MinIO Storage)
+
+### 1. Verification of Iceberg Write to MinIO
+To ensure the Spark compute engine can correctly interact with the Iceberg catalog stored on MinIO, a dedicated verification test was implemented.
+
+**Test Script (`test/test_iceberg_minio.py`):**
+This script initializes a Spark session with the following key configurations:
+- **Extensions:** `org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions`
+- **Catalog Type:** `hadoop`
+- **Warehouse Location:** `s3a://spark-test/iceberg-data`
+- **S3A Endpoint:** `http://minio:9000` (MinIO)
+- **Credentials:** `minioadmin` / `minioadmin`
+
+**Execution Command:**
+```bash
+docker run --rm --network test_default \
+  -v $(pwd)/test/test_iceberg_minio.py:/test/test_iceberg_minio.py \
+  custom-spark:latest \
+  /opt/spark/bin/spark-submit /test/test_iceberg_minio.py
+```
+
+### 2. Results
+The integration test confirmed:
+- **Catalog Connectivity:** Spark successfully connected to the MinIO bucket.
+- **Table Creation:** Created Iceberg table `minio.test_db.iceberg_table`.
+- **Data Persistence:** Successfully inserted and retrieved records from the S3A-backed storage.
+- **Metadata Management:** Iceberg metadata files (v1, v2) were correctly generated in the `metadata/` directory within MinIO.
 
 ### Enabling Full State Capture (Before/After)
 By default, PostgreSQL logs only the primary key values for the `before` state in update/delete events to minimize WAL (Write-Ahead Log) size. This results in the `before` field being `null` in Debezium events for non-primary key columns.

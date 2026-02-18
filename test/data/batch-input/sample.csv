@@ -1,0 +1,11 @@
+id,user_id,action,amount,item_id,platform,region,timestamp
+1,usr_001,purchase,49.99,item_101,ios,us-east-1,2025-10-27T10:15:00Z
+2,usr_002,view,,item_202,android,eu-west-1,2025-10-27T10:15:05Z
+3,usr_003,cart,129.00,item_303,web,ap-south-1,2025-10-27T10:15:10Z
+4,usr_001,view,,item_404,ios,us-east-1,2025-10-27T10:15:15Z
+5,usr_004,purchase,89.50,item_505,web,us-west-2,2025-10-27T10:15:20Z
+6,usr_005,login,,,android,eu-central-1,2025-10-27T10:15:25Z
+7,usr_002,cart,34.99,item_606,android,eu-west-1,2025-10-27T10:15:30Z
+8,usr_006,purchase,299.00,item_707,ios,us-east-1,2025-10-27T10:15:35Z
+9,usr_003,purchase,129.00,item_303,web,ap-south-1,2025-10-27T10:15:40Z
+10,usr_007,view,,item_808,web,ap-northeast-1,2025-10-27T10:15:45Z

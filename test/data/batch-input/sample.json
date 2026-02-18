@@ -1,0 +1,52 @@
+[
+  {
+    "id": "evt_b001",
+    "user_id": "usr_001",
+    "action": "purchase",
+    "metadata": { "amount": 49.99, "item_id": "item_101", "currency": "USD" },
+    "location": "40.71,-74.00",
+    "platform": "ios",
+    "region": "us-east-1",
+    "timestamp": "2025-10-27T10:15:00Z"
+  },
+  {
+    "id": "evt_b002",
+    "user_id": "usr_002",
+    "action": "view",
+    "metadata": { "item_id": "item_202", "page": "/products/item_202" },
+    "location": "51.50,-0.12",
+    "platform": "android",
+    "region": "eu-west-1",
+    "timestamp": "2025-10-27T10:15:05Z"
+  },
+  {
+    "id": "evt_b003",
+    "user_id": "usr_003",
+    "action": "cart",
+    "metadata": { "amount": 129.00, "item_id": "item_303", "quantity": 1 },
+    "location": "19.07,72.87",
+    "platform": "web",
+    "region": "ap-south-1",
+    "timestamp": "2025-10-27T10:15:10Z"
+  },
+  {
+    "id": "evt_b004",
+    "user_id": "usr_008",
+    "action": "login",
+    "metadata": { "method": "oauth", "provider": "google" },
+    "location": "-23.55,-46.63",
+    "platform": "web",
+    "region": "sa-east-1",
+    "timestamp": "2025-10-27T10:15:15Z"
+  },
+  {
+    "id": "evt_b005",
+    "user_id": "usr_004",
+    "action": "purchase",
+    "metadata": { "amount": 89.50, "item_id": "item_505", "currency": "USD" },
+    "location": "47.60,-122.33",
+    "platform": "web",
+    "region": "us-west-2",
+    "timestamp": "2025-10-27T10:15:20Z"
+  }
+]
