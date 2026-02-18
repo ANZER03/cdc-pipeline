@@ -1,13 +1,17 @@
 ###############################################################################
-# EBAP — Docker Compose (Phase 3: PostgreSQL + CDC + Iceberg Catalog)
+# EBAP — Docker Compose (Phase 4: Storage Layer)
 #
 # Services:
 #   - kafka             : Kafka broker in KRaft mode (no Zookeeper)
 #   - kafka-init        : Init container that creates EBAP topics
+#   - kafka-ui          : Web UI for Kafka topics, messages, and consumers
 #   - schema-registry   : Confluent Schema Registry (Avro/JSON/Protobuf)
 #   - postgres          : PostgreSQL (CDC source + Iceberg JDBC catalog)
 #   - debezium-connect  : Debezium Kafka Connect for CDC
 #   - debezium-init     : Init container that registers Debezium connector
+#   - redis             : Redis (hot storage for real-time metrics)
+#   - minio             : MinIO (S3-compatible cold storage / data lakehouse)
+#   - minio-init        : Init container that creates lakehouse buckets
 #
 # Network:
 #   - ebap-net     : Shared bridge network for all services
@@ -83,6 +87,36 @@ services:
     networks:
       - ebap-net
     restart: "no"
+
+  # =========================================================================
+  # Kafka UI — Web dashboard for topics, messages, consumers, and schemas
+  # =========================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ebap-kafka-ui
+    hostname: kafka-ui
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: 'ebap'
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka:9092'
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: 'http://schema-registry:8081'
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: 'debezium'
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: 'http://debezium-connect:8083'
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/api/clusters || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
 
   # =========================================================================
   # Schema Registry — Confluent Schema Registry for Avro/JSON/Protobuf
