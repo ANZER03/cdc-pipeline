@@ -295,6 +295,7 @@ docker exec ebap-postgres psql -U admin -d ebap_db -c \
 
 - **Version:** 7.4.7
 - **Persistence:** RDB snapshot every 60s if at least 1 key changed (`--save 60 1`)
+- **Memory limit:** 256 MB with LRU eviction (`--maxmemory 256mb --maxmemory-policy allkeys-lru`)
 - **Log level:** `warning` (minimal noise)
 - **Healthcheck:** `redis-cli ping` (5s interval, 5 retries)
 - **Volume:** `redis-data:/data`

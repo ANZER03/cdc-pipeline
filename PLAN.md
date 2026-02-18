@@ -78,20 +78,20 @@ PostgreSQL serves a **dual role** in this architecture:
 ## Phase 4: Storage Layer
 
 ### Hot Storage
-- [ ] Add Redis service (`redis:7-alpine`)
-  - [ ] Expose port `6379`
-  - [ ] Add healthcheck (`redis-cli ping`)
-  - [ ] Configure `maxmemory` policy for TTL eviction
+- [x] Add Redis service (`redis:7-alpine`)
+  - [x] Expose port `6379`
+  - [x] Add healthcheck (`redis-cli ping`)
+  - [x] Configure `maxmemory` policy for TTL eviction
 
 ### Cold Storage (Data Lakehouse)
-- [ ] Add MinIO service (`minio/minio:latest`)
-  - [ ] Expose API port `9000` and console port `9001`
-  - [ ] Set `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`
-  - [ ] Add healthcheck (`curl /minio/health/live`)
-- [ ] Add MinIO client (`mc`) init container
-  - [ ] Create buckets: `ebap-bronze`, `ebap-silver`, `ebap-gold`
-  - [ ] Create bucket for Spark checkpoints: `ebap-checkpoints`
-  - [ ] Set `depends_on: minio` with health condition
+- [x] Add MinIO service (`minio/minio:latest`)
+  - [x] Expose API port `9000` and console port `9001`
+  - [x] Set `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`
+  - [x] Add healthcheck (`curl /minio/health/live`)
+- [x] Add MinIO client (`mc`) init container
+  - [x] Create buckets: `ebap-bronze`, `ebap-silver`, `ebap-gold`
+  - [x] Create bucket for Spark checkpoints: `ebap-checkpoints`
+  - [x] Set `depends_on: minio` with health condition
 
 ## Phase 5: Stream Processing (Spark Structured Streaming)
 
