@@ -1,19 +1,12 @@
 -- seed-postgres.sql
--- Seeds the EBAP PostgreSQL instance with:
---   1. The Iceberg JDBC catalog database
---   2. The application database (users table + CDC publication)
+-- Runs against the default database (ebap_db) set via POSTGRES_DB.
+-- Creates the users table, seeds data, and sets up CDC publication.
+--
+-- NOTE: The iceberg_catalog database is created by 00-create-databases.sh
+--       which runs before this file (docker-entrypoint-initdb.d sorts by name).
 
 -- =====================================================================
--- 1. Create the Iceberg JDBC catalog database
---    Both Spark and Trino connect here to register/read table metadata.
---    Data files remain in MinIO; only pointers live in PostgreSQL.
--- =====================================================================
-SELECT 'CREATE DATABASE iceberg_catalog'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'iceberg_catalog');
-\gexec
-
--- =====================================================================
--- 2. Application schema (runs in the default database: ebap_db)
+-- Application schema (runs in ebap_db)
 -- =====================================================================
 
 -- Create the users table (CDC source for Debezium)
@@ -44,4 +37,10 @@ ON CONFLICT (user_id) DO NOTHING;
 
 -- Create publication for Debezium CDC
 -- (Debezium reads from the WAL using this publication)
-CREATE PUBLICATION ebap_publication FOR TABLE users;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'ebap_publication') THEN
+        CREATE PUBLICATION ebap_publication FOR TABLE users;
+    END IF;
+END
+$$;

@@ -56,24 +56,24 @@ PostgreSQL serves a **dual role** in this architecture:
 1. **Source database** — hosts the `users` table for CDC via Debezium
 2. **Iceberg JDBC catalog** — stores Iceberg table metadata (namespaces, table pointers, snapshots) so that both Spark and Trino share a single source of truth for the lakehouse schema
 
-- [ ] Add PostgreSQL service (`debezium/postgres:15`)
-  - [ ] Configure `wal_level=logical` for Debezium CDC
-  - [ ] Expose port `5432`
-  - [ ] Add healthcheck (`pg_isready`)
-  - [ ] Mount init scripts volume (`./init-scripts/`)
-  - [ ] **Create two databases via init script:**
-    - [ ] `ebap_db` — application database (users table, CDC source)
-    - [ ] `iceberg_catalog` — JDBC catalog database for Iceberg metadata
-  - [ ] Seed `ebap_db.users` table with mock data
-  - [ ] Create publication for Debezium CDC on `users` table
-- [ ] Add Kafka Connect / Debezium service (`debezium/connect:2.3`)
-  - [ ] Set `BOOTSTRAP_SERVERS: kafka:9092`
-  - [ ] Configure connector storage topics (configs, offsets, statuses)
-  - [ ] Expose REST API on port `8083`
-  - [ ] Set `depends_on: [kafka, postgres]` with health conditions
-- [ ] Create Debezium connector init container or script
-  - [ ] POST connector JSON config to `http://debezium-connect:8083/connectors`
-  - [ ] Monitor `ebap.cdc.users` topic for user profile changes
+- [x] Add PostgreSQL service (`debezium/postgres:15`)
+  - [x] Configure `wal_level=logical` for Debezium CDC
+  - [x] Expose port `5432`
+  - [x] Add healthcheck (`pg_isready`)
+  - [x] Mount init scripts volume (`./init-scripts/`)
+  - [x] **Create two databases via init script:**
+    - [x] `ebap_db` — application database (users table, CDC source)
+    - [x] `iceberg_catalog` — JDBC catalog database for Iceberg metadata
+  - [x] Seed `ebap_db.users` table with mock data
+  - [x] Create publication for Debezium CDC on `users` table
+- [x] Add Kafka Connect / Debezium service (`debezium/connect:2.3`)
+  - [x] Set `BOOTSTRAP_SERVERS: kafka:9092`
+  - [x] Configure connector storage topics (configs, offsets, statuses)
+  - [x] Expose REST API on port `8083`
+  - [x] Set `depends_on: [kafka, postgres]` with health conditions
+- [x] Create Debezium connector init container or script
+  - [x] POST connector JSON config to `http://debezium-connect:8083/connectors`
+  - [x] Monitor `ebap.cdc.users` topic for user profile changes
 
 ## Phase 4: Storage Layer
 

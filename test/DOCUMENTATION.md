@@ -166,3 +166,105 @@ curl -s http://localhost:8081/subjects/test-subject/versions/1
 - Schema registration: successfully registered and retrieved an Avro schema
 - Schema deletion: soft and permanent delete both work
 - Subjects list: correctly reflects registered/deleted schemas
+
+---
+
+## Phase 3: PostgreSQL + CDC + Iceberg Catalog
+
+**Status:** COMPLETED
+**Date:** 2026-02-18
+
+### What was built
+
+- **PostgreSQL** (`debezium/postgres:15`) with dual-role configuration:
+  - `ebap_db` — application database with `users` table (CDC source)
+  - `iceberg_catalog` — JDBC catalog database for Iceberg metadata (used by Spark + Trino later)
+- **Debezium Kafka Connect** (`debezium/connect:2.3`) for CDC from PostgreSQL to Kafka
+- **debezium-init** container that auto-registers the CDC connector on startup
+- **Init scripts:** `00-create-databases.sh` (creates `iceberg_catalog` DB) + `01-seed-postgres.sql` (creates `users` table, seeds 10 rows, creates CDC publication)
+- **Topic routing:** RegexRouter transform maps `ebap.cdc.public.users` -> `ebap.cdc.users`
+
+### Services
+
+| Service | Container | Image | Ports |
+|---|---|---|---|
+| postgres | ebap-postgres | `debezium/postgres:15` | `5432` |
+| debezium-connect | ebap-debezium-connect | `debezium/connect:2.3` | `8083` (REST API) |
+| debezium-init | ebap-debezium-init | `curlimages/curl:latest` | — (exits after registration) |
+
+### PostgreSQL Configuration
+
+- **User/Password:** `admin` / `admin`
+- **Databases:**
+  - `ebap_db` — default database (set via `POSTGRES_DB`)
+  - `iceberg_catalog` — created by `00-create-databases.sh`
+- **WAL level:** `logical` (enabled by `debezium/postgres` image)
+- **Publication:** `ebap_publication` for `users` table
+- **Named volume:** `postgres-data` for persistence
+
+### Users Table Schema
+
+| Column | Type | Notes |
+|---|---|---|
+| id | SERIAL PRIMARY KEY | Auto-increment |
+| user_id | VARCHAR(64) UNIQUE | Business key (e.g., `usr_001`) |
+| username | VARCHAR(128) | Display name |
+| email | VARCHAR(256) | Email address |
+| tier | VARCHAR(32) | `free`, `premium`, `enterprise` |
+| region | VARCHAR(64) | AWS region format |
+| created_at | TIMESTAMP | Auto-set on insert |
+| updated_at | TIMESTAMP | Updated manually on change |
+
+### Debezium Connector Configuration
+
+- **Connector name:** `ebap-postgres-cdc`
+- **Plugin:** `pgoutput` (native PostgreSQL logical replication)
+- **Slot:** `ebap_slot`
+- **Publication:** `ebap_publication`
+- **Topic prefix:** `ebap.cdc`
+- **Target topic:** `ebap.cdc.users` (via RegexRouter transform)
+- **Converters:** JSON (schemas disabled for readability)
+- **Connect storage topics:** `ebap.connect.configs`, `ebap.connect.offsets`, `ebap.connect.statuses`
+
+### How to Run
+
+```bash
+cd test/
+docker compose up -d
+# Wait for all services — debezium-init exits after registering connector
+docker compose ps -a
+```
+
+### How to Verify
+
+```bash
+# Check databases exist
+docker exec ebap-postgres psql -U admin -d ebap_db -c "\l" | grep -E "ebap_db|iceberg_catalog"
+
+# Check users table
+docker exec ebap-postgres psql -U admin -d ebap_db -c "SELECT * FROM users;"
+
+# Check Debezium connector status
+curl -s http://localhost:8083/connectors/ebap-postgres-cdc/status | python3 -m json.tool
+
+# Read CDC events from Kafka
+docker exec ebap-kafka kafka-console-consumer \
+  --bootstrap-server kafka:9092 \
+  --topic ebap.cdc.users \
+  --from-beginning --max-messages 5 --timeout-ms 10000
+
+# Test live CDC: insert a new user and verify it appears
+docker exec ebap-postgres psql -U admin -d ebap_db -c \
+  "INSERT INTO users (user_id, username, email, tier, region) VALUES ('usr_test', 'test_user', 'test@example.com', 'free', 'us-east-1');"
+# Then consume from the topic again to see the new event
+```
+
+### Test Results
+
+- PostgreSQL: healthy, both `ebap_db` and `iceberg_catalog` databases created
+- Users table: 10 seed rows inserted successfully
+- Publication: `ebap_publication` active on `users` table
+- Debezium Connect: healthy, connector `ebap-postgres-cdc` RUNNING
+- CDC initial snapshot: all 10 users captured on `ebap.cdc.users` topic (`op=r`)
+- CDC live INSERT: new user `usr_011` captured on topic (`op=c`)
+- CDC live UPDATE: tier change for `usr_002` captured with before/after values (`op=u`)

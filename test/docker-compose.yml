@@ -1,10 +1,13 @@
 ###############################################################################
-# EBAP — Docker Compose (Phase 2: Schema Registry & Governance)
+# EBAP — Docker Compose (Phase 3: PostgreSQL + CDC + Iceberg Catalog)
 #
 # Services:
-#   - kafka           : Kafka broker in KRaft mode (no Zookeeper)
-#   - kafka-init      : Init container that creates EBAP topics
-#   - schema-registry : Confluent Schema Registry (Avro/JSON/Protobuf)
+#   - kafka             : Kafka broker in KRaft mode (no Zookeeper)
+#   - kafka-init        : Init container that creates EBAP topics
+#   - schema-registry   : Confluent Schema Registry (Avro/JSON/Protobuf)
+#   - postgres          : PostgreSQL (CDC source + Iceberg JDBC catalog)
+#   - debezium-connect  : Debezium Kafka Connect for CDC
+#   - debezium-init     : Init container that registers Debezium connector
 #
 # Network:
 #   - ebap-net     : Shared bridge network for all services
@@ -17,6 +20,7 @@ networks:
 
 volumes:
   kafka-data:
+  postgres-data:
 
 services:
 
@@ -105,3 +109,81 @@ services:
       timeout: 10s
       retries: 10
     restart: unless-stopped
+
+  # =========================================================================
+  # PostgreSQL — CDC Source Database + Iceberg JDBC Catalog
+  # =========================================================================
+  postgres:
+    image: debezium/postgres:15
+    container_name: ebap-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: ebap_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts/00-create-databases.sh:/docker-entrypoint-initdb.d/00-create-databases.sh:ro
+      - ./init-scripts/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d ebap_db"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # Debezium Kafka Connect — CDC from PostgreSQL to Kafka
+  # =========================================================================
+  debezium-connect:
+    image: debezium/connect:2.3
+    container_name: ebap-debezium-connect
+    hostname: debezium-connect
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: 'kafka:9092'
+      GROUP_ID: 'ebap-connect-cluster'
+      CONFIG_STORAGE_TOPIC: 'ebap.connect.configs'
+      OFFSET_STORAGE_TOPIC: 'ebap.connect.offsets'
+      STATUS_STORAGE_TOPIC: 'ebap.connect.statuses'
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
+      VALUE_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  # =========================================================================
+  # Debezium Init — Registers the CDC connector after Connect is ready
+  # =========================================================================
+  debezium-init:
+    image: curlimages/curl:latest
+    container_name: ebap-debezium-init
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+    volumes:
+      - ./init-scripts/register-debezium.sh:/scripts/register-debezium.sh:ro
+      - ./config/debezium/postgres-connector.json:/config/postgres-connector.json:ro
+    entrypoint: ["sh", "/scripts/register-debezium.sh"]
+    networks:
+      - ebap-net
+    restart: "no"
