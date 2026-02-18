@@ -1,67 +1,107 @@
+###############################################################################
+# EBAP — Docker Compose (Phase 2: Schema Registry & Governance)
+#
+# Services:
+#   - kafka           : Kafka broker in KRaft mode (no Zookeeper)
+#   - kafka-init      : Init container that creates EBAP topics
+#   - schema-registry : Confluent Schema Registry (Avro/JSON/Protobuf)
+#
+# Network:
+#   - ebap-net     : Shared bridge network for all services
+###############################################################################
+
+networks:
+  ebap-net:
+    driver: bridge
+    name: ebap-net
+
+volumes:
+  kafka-data:
+
 services:
+
+  # =========================================================================
+  # Kafka Broker (KRaft Mode — No Zookeeper)
+  # =========================================================================
   kafka:
     image: confluentinc/cp-kafka:7.7.7
+    container_name: ebap-kafka
+    hostname: kafka
     ports:
-      - "9092:9092"
+      - "9092:9092"       # External access (host machine)
+      - "29092:29092"     # Internal access (containers)
     environment:
+      # --- KRaft Configuration ---
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+      # --- Listeners ---
       KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093'
       KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      # --- Topic Defaults ---
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # --- Log Retention ---
+      KAFKA_LOG_RETENTION_HOURS: 168           # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824      # 1 GB segments
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - ebap-net
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
       interval: 5s
       timeout: 10s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-
-  mc:
-    image: minio/mc
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      until (/usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin) do echo '...waiting...' && sleep 1; done;
-      /usr/bin/mc mb myminio/spark-test || true;
-      exit 0;
-      "
-
-  spark:
-    image: custom-spark:latest
-    volumes:
-      - ./test_connectors.py:/test/test_connectors.py
-    command: /opt/spark/bin/spark-submit /test/test_connectors.py
+  # =========================================================================
+  # Kafka Init — Creates EBAP topics on startup
+  # =========================================================================
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.7
+    container_name: ebap-kafka-init
     depends_on:
       kafka:
         condition: service_healthy
-      minio:
-        condition: service_healthy
-      mc:
-        condition: service_completed_successfully
+    volumes:
+      - ./init-scripts/create-topics.sh:/scripts/create-topics.sh:ro
+    entrypoint: ["bash", "/scripts/create-topics.sh"]
+    networks:
+      - ebap-net
+    restart: "no"
+
+  # =========================================================================
+  # Schema Registry — Confluent Schema Registry for Avro/JSON/Protobuf
+  # =========================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.7
+    container_name: ebap-schema-registry
+    hostname: schema-registry
+    ports:
+      - "8081:8081"
     environment:
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
+      SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: 'BACKWARD'
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped

@@ -1,0 +1,7 @@
+# EBAP — Progress Log
+
+> Every issue encountered, fix applied, or workaround discovered is logged here.
+> Format: [DATE] Phase X — short description of the problem and solution.
+
+---
+

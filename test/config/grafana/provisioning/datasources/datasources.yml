@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Redis
+    type: redis-datasource
+    access: proxy
+    url: redis:6379
+    isDefault: false
+    editable: true
+
+  - name: Trino
+    type: grafana-trino-datasource
+    access: proxy
+    url: http://trino:8085
+    isDefault: false
+    editable: true
+    jsonData:
+      catalog: iceberg
+      schema: ebap

@@ -16,6 +16,15 @@
 | Redis | `redis:7-alpine` |
 | Grafana | `grafana/grafana:latest` |
 
+**Iceberg Catalog Strategy: PostgreSQL JDBC Catalog**
+
+PostgreSQL serves as the **shared JDBC catalog** for Apache Iceberg. Both Spark and Trino
+connect to the same `iceberg_catalog` database to read/write table metadata. This ensures:
+- A single source of truth for table schemas, namespaces, and snapshot pointers
+- No reliance on a Hive Metastore (simpler stack)
+- ACID-safe metadata operations backed by PostgreSQL transactions
+- Data files remain in MinIO (S3); only metadata pointers live in PostgreSQL
+
 ---
 
 ## Phase 1: Core Infrastructure (Network & Coordination)
@@ -35,19 +44,28 @@
 
 ## Phase 2: Schema Registry & Governance
 
-- [ ] Add Schema Registry service (`confluentinc/cp-schema-registry:7.7.7`)
-  - [ ] Connect to Kafka broker (`SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS`)
-  - [ ] Expose port `8081`
-  - [ ] Add healthcheck
-  - [ ] Set `depends_on: kafka` with health condition
+- [x] Add Schema Registry service (`confluentinc/cp-schema-registry:7.7.7`)
+  - [x] Connect to Kafka broker (`SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS`)
+  - [x] Expose port `8081`
+  - [x] Add healthcheck
+  - [x] Set `depends_on: kafka` with health condition
 
-## Phase 3: Source Database (PostgreSQL + CDC)
+## Phase 3: Source Database (PostgreSQL + CDC + Iceberg Catalog)
+
+PostgreSQL serves a **dual role** in this architecture:
+1. **Source database** — hosts the `users` table for CDC via Debezium
+2. **Iceberg JDBC catalog** — stores Iceberg table metadata (namespaces, table pointers, snapshots) so that both Spark and Trino share a single source of truth for the lakehouse schema
 
 - [ ] Add PostgreSQL service (`debezium/postgres:15`)
   - [ ] Configure `wal_level=logical` for Debezium CDC
-  - [ ] Seed `users` table via init script (mount `./init-scripts/` volume)
   - [ ] Expose port `5432`
   - [ ] Add healthcheck (`pg_isready`)
+  - [ ] Mount init scripts volume (`./init-scripts/`)
+  - [ ] **Create two databases via init script:**
+    - [ ] `ebap_db` — application database (users table, CDC source)
+    - [ ] `iceberg_catalog` — JDBC catalog database for Iceberg metadata
+  - [ ] Seed `ebap_db.users` table with mock data
+  - [ ] Create publication for Debezium CDC on `users` table
 - [ ] Add Kafka Connect / Debezium service (`debezium/connect:2.3`)
   - [ ] Set `BOOTSTRAP_SERVERS: kafka:9092`
   - [ ] Configure connector storage topics (configs, offsets, statuses)
@@ -78,12 +96,21 @@
 ## Phase 5: Stream Processing (Spark Structured Streaming)
 
 - [ ] Update `test/Dockerfile` to include Redis client JAR (`jedis` or `spark-redis`)
+- [ ] Update `test/Dockerfile` to include PostgreSQL JDBC driver (`postgresql-42.x.jar`) for Iceberg JDBC catalog
 - [ ] Add Spark Master service (`custom-spark:latest`)
   - [ ] Run as Spark master node
   - [ ] Expose Spark UI on port `8080`
   - [ ] Configure S3A/MinIO endpoint and credentials via environment
-  - [ ] Configure Iceberg catalog properties
-  - [ ] Set `depends_on: [kafka, minio, redis]` with health conditions
+  - [ ] Configure Iceberg with JDBC catalog:
+    - [ ] `spark.sql.catalog.ebap = org.apache.iceberg.spark.SparkCatalog`
+    - [ ] `spark.sql.catalog.ebap.catalog-impl = org.apache.iceberg.jdbc.JdbcCatalog`
+    - [ ] `spark.sql.catalog.ebap.uri = jdbc:postgresql://postgres:5432/iceberg_catalog`
+    - [ ] `spark.sql.catalog.ebap.jdbc.user = admin`
+    - [ ] `spark.sql.catalog.ebap.jdbc.password = admin`
+    - [ ] `spark.sql.catalog.ebap.warehouse = s3a://ebap-silver/`
+    - [ ] `spark.sql.catalog.ebap.io-impl = org.apache.iceberg.aws.s3.S3FileIO`
+    - [ ] `spark.sql.catalog.ebap.s3.endpoint = http://minio:9000`
+  - [ ] Set `depends_on: [kafka, minio, redis, postgres]` with health conditions
 - [ ] Add Spark Worker service(s) (`custom-spark:latest`)
   - [ ] Connect to Spark Master
   - [ ] Scale: `deploy.replicas: 2` (minimum)
@@ -100,7 +127,11 @@
   - [ ] Separate Spark master for batch workloads
   - [ ] Expose Spark UI on port `8090` (different from streaming)
   - [ ] Configure S3A/MinIO endpoint and credentials
-  - [ ] Set `depends_on: [minio]` with health condition
+  - [ ] Configure Iceberg with JDBC catalog (same config as streaming Spark):
+    - [ ] `spark.sql.catalog.ebap.catalog-impl = org.apache.iceberg.jdbc.JdbcCatalog`
+    - [ ] `spark.sql.catalog.ebap.uri = jdbc:postgresql://postgres:5432/iceberg_catalog`
+    - [ ] `spark.sql.catalog.ebap.warehouse = s3a://ebap-silver/`
+  - [ ] Set `depends_on: [minio, postgres]` with health condition
 - [ ] Add Spark Batch Worker(s) (`custom-spark:latest`)
   - [ ] Connect to batch Spark Master
   - [ ] Mount batch job scripts (`./src/batch/`)
@@ -120,11 +151,18 @@
   - [ ] Expose port `8085` (web UI + JDBC)
   - [ ] Mount catalog config: `./config/trino/iceberg.properties`
     - [ ] Set `connector.name=iceberg`
-    - [ ] Set `iceberg.catalog.type=hadoop`
-    - [ ] Set `hive.s3.endpoint=http://minio:9000`
-    - [ ] Set S3 credentials
-  - [ ] Set `depends_on: [minio]` with health condition
-- [ ] Validate Trino can query Iceberg tables written by Spark
+    - [ ] Set `iceberg.catalog.type=jdbc`
+    - [ ] Set `iceberg.jdbc-catalog.catalog-name=ebap`
+    - [ ] Set `iceberg.jdbc-catalog.driver-class=org.postgresql.Driver`
+    - [ ] Set `iceberg.jdbc-catalog.connection-url=jdbc:postgresql://postgres:5432/iceberg_catalog`
+    - [ ] Set `iceberg.jdbc-catalog.connection-user=admin`
+    - [ ] Set `iceberg.jdbc-catalog.connection-password=admin`
+    - [ ] Set `iceberg.jdbc-catalog.default-warehouse-dir=s3a://ebap-silver/`
+    - [ ] Set S3/MinIO endpoint and credentials (`hive.s3.*`)
+  - [ ] Mount PostgreSQL JDBC driver into Trino plugin directory
+  - [ ] Set `depends_on: [minio, postgres]` with health condition
+- [ ] Validate Trino reads the same Iceberg tables written by Spark (shared JDBC catalog)
+- [ ] Verify namespace and table metadata is visible in `iceberg_catalog` PostgreSQL database
 
 ## Phase 8: Visualization (Grafana)
 
@@ -176,10 +214,12 @@
   ```
 - [ ] Add `depends_on` ordering to ensure correct startup sequence:
   ```
-  kafka → schema-registry → kafka-connect → postgres
-                          → spark-streaming → redis
-  minio → mc-init → spark-batch
-                   → trino
+  postgres (first — hosts CDC source + Iceberg catalog DB)
+    → kafka → schema-registry → kafka-connect
+    → spark-streaming (needs kafka + minio + redis + postgres)
+    → spark-batch (needs minio + postgres)
+  minio → mc-init
+  trino (needs minio + postgres for JDBC catalog)
   grafana (last, depends on redis + trino)
   ```
 - [ ] Add restart policies (`restart: unless-stopped`) for long-running services

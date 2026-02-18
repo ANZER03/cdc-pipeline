@@ -1,0 +1,21 @@
+{
+  "name": "ebap-postgres-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "admin",
+    "database.password": "admin",
+    "database.dbname": "ebap_db",
+    "database.server.name": "ebap",
+    "topic.prefix": "ebap.cdc",
+    "table.include.list": "public.users",
+    "plugin.name": "pgoutput",
+    "slot.name": "ebap_slot",
+    "publication.name": "ebap_publication",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": false,
+    "value.converter.schemas.enable": false
+  }
+}
