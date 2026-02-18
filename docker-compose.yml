@@ -1,72 +1,223 @@
+###############################################################################
+# EBAP — Docker Compose (Phase 4: Storage Layer)
+#
+# Services:
+#   - kafka             : Kafka broker in KRaft mode (no Zookeeper)
+#   - kafka-init        : Init container that creates EBAP topics
+#   - kafka-ui          : Web UI for Kafka topics, messages, and consumers
+#   - schema-registry   : Confluent Schema Registry (Avro/JSON/Protobuf)
+#   - postgres          : PostgreSQL (CDC source + Iceberg JDBC catalog)
+#   - debezium-connect  : Debezium Kafka Connect for CDC
+#   - debezium-init     : Init container that registers Debezium connector
+#   - redis             : Redis (hot storage for real-time metrics)
+#   - minio             : MinIO (S3-compatible cold storage / data lakehouse)
+#   - minio-init        : Init container that creates lakehouse buckets
+#
+# Network:
+#   - ebap-net     : Shared bridge network for all services
+###############################################################################
+
+networks:
+  ebap-net:
+    driver: bridge
+    name: ebap-net
+
+volumes:
+  kafka-data:
+  postgres-data:
+
 services:
-  # --- SOURCES DE DONNÉES ---
-  db-postgres:
-    image: debezium/postgres:15
-    environment: [POSTGRES_USER=admin, POSTGRES_PASSWORD=admin, POSTGRES_DB=customer_db]
-    volumes: ["./postgres_data:/docker-entrypoint-initdb.d"]
-    ports: ["5432:5432"]
 
-  db-mysql-sales:
-    image: debezium/example-mysql:2.3
-    environment: [MYSQL_ROOT_PASSWORD=admin, MYSQL_USER=user1, MYSQL_PASSWORD=pass1, MYSQL_DATABASE=sales_db]
-    volumes: ["./mysql1_data:/docker-entrypoint-initdb.d"]
-    ports: ["3306:3306"]
-
-  db-mysql-hr:
-    image: debezium/example-mysql:2.3
-    environment: [MYSQL_ROOT_PASSWORD=admin, MYSQL_USER=user2, MYSQL_PASSWORD=pass2, MYSQL_DATABASE=hr_db]
-    volumes: ["./mysql2_data:/docker-entrypoint-initdb.d"]
-    ports: ["3307:3306"]
-
-  # --- LE CŒUR : KAFKA & DEBEZIUM ---
+  # =========================================================================
+  # Kafka Broker (KRaft Mode — No Zookeeper)
+  # =========================================================================
   kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    ports: ["9092:9092"]
+    image: confluentinc/cp-kafka:7.7.7
+    container_name: ebap-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"       # External access (host machine)
+      - "29092:29092"     # Internal access (containers)
     environment:
+      # --- KRaft Configuration ---
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+      # --- Listeners ---
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      # --- Topic Defaults ---
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
+      # --- Log Retention ---
+      KAFKA_LOG_RETENTION_HOURS: 168           # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824      # 1 GB segments
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # Kafka Init — Creates EBAP topics on startup
+  # =========================================================================
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.7
+    container_name: ebap-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./init-scripts/create-topics.sh:/scripts/create-topics.sh:ro
+    entrypoint: ["bash", "/scripts/create-topics.sh"]
+    networks:
+      - ebap-net
+    restart: "no"
+
+  # =========================================================================
+  # Kafka UI — Web dashboard for topics, messages, consumers, and schemas
+  # =========================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ebap-kafka-ui
+    hostname: kafka-ui
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: 'ebap'
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka:9092'
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: 'http://schema-registry:8081'
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: 'debezium'
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: 'http://debezium-connect:8083'
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/api/clusters || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # Schema Registry — Confluent Schema Registry for Avro/JSON/Protobuf
+  # =========================================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.7
+    container_name: ebap-schema-registry
+    hostname: schema-registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
+      SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: 'BACKWARD'
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # PostgreSQL — CDC Source Database + Iceberg JDBC Catalog
+  # =========================================================================
+  postgres:
+    image: debezium/postgres:15
+    container_name: ebap-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: ebap_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts/00-create-databases.sh:/docker-entrypoint-initdb.d/00-create-databases.sh:ro
+      - ./init-scripts/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d ebap_db"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # =========================================================================
+  # Debezium Kafka Connect — CDC from PostgreSQL to Kafka
+  # =========================================================================
   debezium-connect:
     image: debezium/connect:2.3
-    ports: ["8083:8083"]
+    container_name: ebap-debezium-connect
+    hostname: debezium-connect
+    ports:
+      - "8083:8083"
     environment:
-      BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: 1
-      CONFIG_STORAGE_TOPIC: connect_configs
-      OFFSET_STORAGE_TOPIC: connect_offsets
-      STATUS_STORAGE_TOPIC: connect_statuses
+      BOOTSTRAP_SERVERS: 'kafka:9092'
+      GROUP_ID: 'ebap-connect-cluster'
+      CONFIG_STORAGE_TOPIC: 'ebap.connect.configs'
+      OFFSET_STORAGE_TOPIC: 'ebap.connect.offsets'
+      STATUS_STORAGE_TOPIC: 'ebap.connect.statuses'
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-    depends_on: [kafka]
+      KEY_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
+      VALUE_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
 
-  # --- LE STOCKAGE (LAKEHOUSE) ---
-  minio:
-    image: minio/minio
-    ports: ["9000:9000", "9001:9001"]
-    environment: [MINIO_ROOT_USER=admin, MINIO_ROOT_PASSWORD=password]
-    command: server /data --console-address ":9001"
-
-  # --- LE TRAITEMENT (SPARK & TRINO) ---
-  spark-iceberg:
-    image: tabulario/spark-iceberg
-    ports: ["8888:8888", "8080:8080"]
-    environment:
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-    depends_on: [minio]
-
-  trino:
-    image: trinodb/trino
-    ports: ["8081:8080"]
+  # =========================================================================
+  # Debezium Init — Registers the CDC connector after Connect is ready
+  # =========================================================================
+  debezium-init:
+    image: curlimages/curl:latest
+    container_name: ebap-debezium-init
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+    volumes:
+      - ./init-scripts/register-debezium.sh:/scripts/register-debezium.sh:ro
+      - ./config/debezium/postgres-connector.json:/config/postgres-connector.json:ro
+    entrypoint: ["sh", "/scripts/register-debezium.sh"]
+    networks:
+      - ebap-net
+    restart: "no"

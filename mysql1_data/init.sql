@@ -1,2 +1,0 @@
-CREATE TABLE orders (id INT PRIMARY KEY AUTO_INCREMENT, item VARCHAR(50));
-INSERT INTO orders (item) VALUES ('Laptop');
