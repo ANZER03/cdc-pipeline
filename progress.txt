@@ -95,3 +95,16 @@
       --bootstrap-server localhost:9092 --topic ebap.events.raw
   ```
 
+---
+
+## CDC — Debezium `before` field null on UPDATE/DELETE (2026-02-18)
+
+**Issue 16:** Debezium `before` field is `null` for UPDATE and DELETE events
+- **Cause:** PostgreSQL's default `REPLICA IDENTITY DEFAULT` only writes the primary key columns to the WAL for old row images. Debezium reads the WAL and can only populate `before` with what Postgres logged — everything except the PK comes back as `null`.
+- **Fix:** Set `REPLICA IDENTITY FULL` on the `users` table so Postgres logs the entire old row for every UPDATE and DELETE:
+  ```sql
+  ALTER TABLE users REPLICA IDENTITY FULL;
+  ```
+  Applied immediately to the running container and persisted in `init-scripts/seed-postgres.sql` (after the `CREATE TABLE` block) for future fresh deployments.
+- **Verification:** Confirmed via `pg_class.relreplident = 'f'` and by consuming `ebap.cdc.users` — UPDATE events now show full `before` + `after`, DELETE events show full `before` with `after: null`.
+
