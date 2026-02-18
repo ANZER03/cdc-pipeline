@@ -25,6 +25,8 @@ networks:
 volumes:
   kafka-data:
   postgres-data:
+  redis-data:
+  minio-data:
 
 services:
 
@@ -218,6 +220,74 @@ services:
       - ./init-scripts/register-debezium.sh:/scripts/register-debezium.sh:ro
       - ./config/debezium/postgres-connector.json:/config/postgres-connector.json:ro
     entrypoint: ["sh", "/scripts/register-debezium.sh"]
+    networks:
+      - ebap-net
+    restart: "no"
+
+  # =========================================================================
+  # Redis — Hot Storage for Real-time Metrics
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ebap-redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # =========================================================================
+  # MinIO — Cold Storage / Data Lakehouse (S3 Compatible)
+  # =========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: ebap-minio
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # =========================================================================
+  # MinIO Init — Creates Lakehouse Buckets
+  # =========================================================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: ebap-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set myminio http://minio:9000 admin password; do echo 'Waiting for MinIO...'; sleep 1; done;
+      mc mb --ignore-existing myminio/ebap-bronze;
+      mc mb --ignore-existing myminio/ebap-silver;
+      mc mb --ignore-existing myminio/ebap-gold;
+      mc mb --ignore-existing myminio/ebap-checkpoints;
+      echo 'All EBAP buckets created successfully.';
+      "
     networks:
       - ebap-net
     restart: "no"

@@ -268,3 +268,94 @@ docker exec ebap-postgres psql -U admin -d ebap_db -c \
 - CDC initial snapshot: all 10 users captured on `ebap.cdc.users` topic (`op=r`)
 - CDC live INSERT: new user `usr_011` captured on topic (`op=c`)
 - CDC live UPDATE: tier change for `usr_002` captured with before/after values (`op=u`)
+
+---
+
+## Phase 4: Storage Layer
+
+**Status:** COMPLETED
+**Date:** 2026-02-18
+
+### What was built
+
+- **Redis** (`redis:7-alpine`) — hot storage for real-time metrics with RDB persistence
+- **MinIO** (`minio/minio:latest`) — S3-compatible object storage for the data lakehouse
+- **MinIO Init** (`minio/mc:latest`) — init container that creates the 4 lakehouse buckets on startup
+- **Named volumes** `redis-data` and `minio-data` for persistence
+
+### Services
+
+| Service | Container | Image | Ports |
+|---|---|---|---|
+| redis | ebap-redis | `redis:7-alpine` | `6379` (Redis protocol) |
+| minio | ebap-minio | `minio/minio:latest` | `9000` (S3 API), `9001` (Console UI) |
+| minio-init | ebap-minio-init | `minio/mc:latest` | — (exits after bucket creation) |
+
+### Redis Configuration
+
+- **Version:** 7.4.7
+- **Persistence:** RDB snapshot every 60s if at least 1 key changed (`--save 60 1`)
+- **Log level:** `warning` (minimal noise)
+- **Healthcheck:** `redis-cli ping` (5s interval, 5 retries)
+- **Volume:** `redis-data:/data`
+- **Restart policy:** `unless-stopped`
+
+### MinIO Configuration
+
+- **Credentials:** `admin` / `password`
+- **S3 API:** `http://minio:9000` (inter-container) / `http://localhost:9000` (host)
+- **Console:** `http://localhost:9001`
+- **Healthcheck:** `curl -f http://localhost:9000/minio/health/live` (10s interval, 5 retries)
+- **Volume:** `minio-data:/data`
+- **Restart policy:** `unless-stopped`
+
+### Buckets Created
+
+| Bucket | Purpose |
+|---|---|
+| `ebap-bronze` | Raw ingested data (landing zone) |
+| `ebap-silver` | Cleansed/transformed Iceberg tables (main warehouse) |
+| `ebap-gold` | Aggregated/business-ready datasets |
+| `ebap-checkpoints` | Spark Structured Streaming checkpoint state |
+
+### How to Run
+
+```bash
+docker compose up -d redis minio
+# Wait for both to become healthy
+docker compose up -d minio-init
+# Check init logs
+docker logs ebap-minio-init
+```
+
+### How to Verify
+
+```bash
+# Redis: PING test
+docker exec ebap-redis redis-cli ping
+# Expected: PONG
+
+# Redis: SET/GET round-trip
+docker exec ebap-redis redis-cli SET test:key "hello" EX 60
+docker exec ebap-redis redis-cli GET test:key
+# Expected: hello
+
+# MinIO: Health check
+curl -s http://localhost:9000/minio/health/live
+curl -s http://localhost:9000/minio/health/ready
+
+# MinIO: List buckets
+docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
+  -c "mc alias set myminio http://minio:9000 admin password && mc ls myminio/"
+# Expected: ebap-bronze/, ebap-silver/, ebap-gold/, ebap-checkpoints/
+
+# MinIO Console: http://localhost:9001 (login: admin / password)
+```
+
+### Test Results
+
+- Redis: healthy, version 7.4.7, PING/SET/GET/DEL all working
+- MinIO: healthy, live and ready endpoints responding
+- MinIO Init: all 4 buckets (`ebap-bronze`, `ebap-silver`, `ebap-gold`, `ebap-checkpoints`) created successfully
+- All pre-existing services (Kafka, Schema Registry, PostgreSQL, Debezium, Kafka UI) remain healthy
+- Total running services: 7 (all healthy)
