@@ -1,17 +1,21 @@
 ###############################################################################
-# EBAP — Docker Compose (Phase 4: Storage Layer)
+# EBAP — Docker Compose (Phase 5: Stream Processing)
 #
 # Services:
-#   - kafka             : Kafka broker in KRaft mode (no Zookeeper)
-#   - kafka-init        : Init container that creates EBAP topics
-#   - kafka-ui          : Web UI for Kafka topics, messages, and consumers
-#   - schema-registry   : Confluent Schema Registry (Avro/JSON/Protobuf)
-#   - postgres          : PostgreSQL (CDC source + Iceberg JDBC catalog)
-#   - debezium-connect  : Debezium Kafka Connect for CDC
-#   - debezium-init     : Init container that registers Debezium connector
-#   - redis             : Redis (hot storage for real-time metrics)
-#   - minio             : MinIO (S3-compatible cold storage / data lakehouse)
-#   - minio-init        : Init container that creates lakehouse buckets
+#   - kafka                    : Kafka broker 1 in KRaft mode (no Zookeeper)
+#   - kafka-2                  : Kafka broker 2 (cluster node)
+#   - kafka-init               : Init container that creates EBAP topics
+#   - kafka-ui                 : Web UI for Kafka topics, messages, and consumers
+#   - schema-registry          : Confluent Schema Registry (Avro/JSON/Protobuf)
+#   - postgres                 : PostgreSQL (CDC source + Iceberg JDBC catalog)
+#   - debezium-connect         : Debezium Kafka Connect for CDC
+#   - debezium-init            : Init container that registers Debezium connector
+#   - redis                    : Redis (hot storage for real-time metrics)
+#   - minio                    : MinIO (S3-compatible cold storage / data lakehouse)
+#   - minio-init               : Init container that creates lakehouse buckets
+#   - spark-master-streaming   : Spark master for structured streaming jobs
+#   - spark-worker             : Spark worker (1 replica)
+#   - spark-streaming-submit   : Init container that submits the streaming job
 #
 # Network:
 #   - ebap-net     : Shared bridge network for all services
@@ -333,6 +337,120 @@ services:
       mc mb --ignore-existing myminio/ebap-checkpoints;
       echo 'All EBAP buckets created successfully.';
       "
+    networks:
+      - ebap-net
+    restart: "no"
+
+  # =========================================================================
+  # Spark Master — Streaming (Phase 5)
+  # =========================================================================
+  spark-master-streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: custom-spark:latest
+    container_name: ebap-spark-master-streaming
+    hostname: spark-master-streaming
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8082:8080"    # Spark Web UI
+      - "7077:7077"    # Spark master port (workers connect here)
+    environment:
+      SPARK_MASTER_HOST: spark-master-streaming
+      SPARK_MASTER_PORT: 7077
+      SPARK_MASTER_WEBUI_PORT: 8080
+      # --- S3A / MinIO ---
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+      # --- Spark conf defaults (picked up by submitted jobs) ---
+      SPARK_CONF_DIR: /opt/spark/conf
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # =========================================================================
+  # Spark Worker — Streaming (Phase 5)
+  # =========================================================================
+  spark-worker:
+    image: custom-spark:latest
+    container_name: ebap-spark-worker
+    hostname: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master-streaming:7077
+    environment:
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_WEBUI_PORT: 8081
+      # --- S3A / MinIO ---
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+    depends_on:
+      spark-master-streaming:
+        condition: service_healthy
+    networks:
+      - ebap-net
+    restart: unless-stopped
+
+  # =========================================================================
+  # Spark Streaming Submit — Submits the PySpark streaming job (Phase 5)
+  # =========================================================================
+  spark-streaming-submit:
+    image: custom-spark:latest
+    container_name: ebap-spark-streaming-submit
+    depends_on:
+      spark-master-streaming:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      debezium-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./src/streaming:/opt/spark/jobs:ro
+    environment:
+      # --- S3A / MinIO ---
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+    entrypoint: >
+      /opt/spark/bin/spark-submit
+        --master spark://spark-master-streaming:7077
+        --name "EBAP-Streaming"
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+        --conf spark.sql.catalog.ebap=org.apache.iceberg.spark.SparkCatalog
+        --conf spark.sql.catalog.ebap.catalog-impl=org.apache.iceberg.jdbc.JdbcCatalog
+        --conf spark.sql.catalog.ebap.uri=jdbc:postgresql://postgres:5432/iceberg_catalog
+        --conf spark.sql.catalog.ebap.jdbc.user=admin
+        --conf spark.sql.catalog.ebap.jdbc.password=admin
+        --conf spark.sql.catalog.ebap.warehouse=s3a://ebap-silver/
+        --conf spark.sql.catalog.ebap.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+        --conf spark.sql.catalog.ebap.s3.endpoint=http://minio:9000
+        --conf spark.sql.catalog.ebap.s3.path-style-access=true
+        --conf spark.sql.catalog.ebap.s3.region=us-east-1
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
+        --conf spark.hadoop.fs.s3a.access.key=admin
+        --conf spark.hadoop.fs.s3a.secret.key=password
+        --conf spark.hadoop.fs.s3a.path.style.access=true
+        --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+        --conf spark.redis.host=redis
+        --conf spark.redis.port=6379
+        --conf spark.streaming.stopGracefullyOnShutdown=true
+        /opt/spark/jobs/stream_processing.py
     networks:
       - ebap-net
     restart: "no"

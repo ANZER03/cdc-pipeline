@@ -5,3 +5,49 @@
 
 ---
 
+## Phase 5 — Stream Processing (2026-02-18)
+
+**Issue 1:** `NoClassDefFoundError: software/amazon/awssdk/core/exception/SdkException`
+- **Cause:** `org.apache.iceberg.aws.s3.S3FileIO` lives in `iceberg-aws-bundle`, not in `iceberg-spark-runtime`.
+- **Fix:** Added `iceberg-aws-bundle-1.7.1.jar` (49 MB) as a separate layer in the `Dockerfile`.
+
+**Issue 2:** `SdkClientException: Unable to load region`
+- **Cause:** AWS SDK v2 (inside `iceberg-aws-bundle`) requires the `AWS_REGION` environment variable to be set even for non-AWS (MinIO) deployments.
+- **Fix:** Added `AWS_REGION: us-east-1` to all Spark container `environment` blocks in `docker-compose.yml`.
+
+**Issue 3:** `ModuleNotFoundError: No module named 'redis'`
+- **Cause:** The `spark-redis` JAR provides the Java/Scala connector, but the Python `redis` package is needed separately for `foreachBatch` Python sink functions.
+- **Fix:** Added `pip3 install redis==5.2.1` to the `Dockerfile`.
+
+**Issue 4:** Stream-stream LEFT OUTER join not supported without time-range condition
+- **Cause:** Spark Structured Streaming requires a watermark AND a time-range join predicate for left outer stream-stream joins.
+- **Fix:** Changed to `inner` join. Acceptable because Debezium snapshots all existing users at startup (`op=r`), so all active `user_id` values are present in the CDC stream before live events arrive.
+
+**Issue 5:** `AnalysisException: Append output mode not supported for stream-stream join`
+- **Cause:** Stream-stream join output must use `append` mode, not `update`.
+- **Fix:** Changed the `iceberg-enriched-events` query `outputMode` to `"append"`. The windowed aggregation queries (no join) continued to use `"update"` correctly.
+
+**Issue 6:** Windowed aggregation for Redis referencing `enriched_df` instead of `events_df`
+- **Cause:** `enriched_df` comes from the stream-stream join which requires `append` mode. The 1-minute Redis window query used `update` mode — incompatible.
+- **Fix:** Rewrote `build_windowed_metrics()` to use `events_df` (raw events, no join). Used `coalesce(location, "unknown")` aliased as `region` for Redis key compatibility.
+
+**Issue 7:** Windowed aggregation with watermark only emits rows when watermark advances past `window_end + watermark_duration`
+- **Observation:** In `update` mode, windows don't emit until the watermark has advanced sufficiently. Verified by producing events with timestamps ≥ window_end + 10 minutes.
+- **Workaround:** This is expected Spark behavior. For testing, produce events with future timestamps to force window closure.
+
+**Issue 8:** Spark master UI port 8080 conflict
+- **Cause:** Port 8080 was already in use on the host machine.
+- **Fix:** Mapped Spark master UI to host port `8082` (`"8082:8080"` in `docker-compose.yml`).
+
+**Issue 9:** Docker layer cache corruption during Dockerfile build
+- **Symptom:** JAR download steps resolved from corrupt cache, producing broken JARs.
+- **Fix:** Ran `docker compose build --no-cache` to force a clean rebuild.
+
+**Issue 10:** `ebap-net` network warning `"not created for project"`
+- **Observation:** Cosmetic Docker Compose warning when re-upping an already-running stack. Network is created and functional.
+- **Disposition:** Harmless; no fix needed.
+
+**Issue 11:** Kafka topic names with periods generate metric warning
+- **Observation:** `[AdminClient] Error in admin client` warning about topic names with dots (e.g., `ebap.events.raw`). Cosmetic only.
+- **Disposition:** Harmless; no fix needed.
+

@@ -360,3 +360,160 @@ docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
 - MinIO Init: all 4 buckets (`ebap-bronze`, `ebap-silver`, `ebap-gold`, `ebap-checkpoints`) created successfully
 - All pre-existing services (Kafka, Schema Registry, PostgreSQL, Debezium, Kafka UI) remain healthy
 - Total running services: 7 (all healthy)
+
+---
+
+## Phase 5: Stream Processing
+
+**Status:** COMPLETED
+**Date:** 2026-02-18
+
+### What was built
+
+- **Custom Spark image** (`custom-spark:latest`) built from `Dockerfile` — includes all JARs needed for Kafka, S3A/MinIO, Iceberg JDBC catalog, PostgreSQL JDBC driver, spark-redis, and iceberg-aws-bundle
+- **Spark Master** (`spark-master-streaming`) — Spark 3.x standalone master, Spark UI on port 8082
+- **Spark Worker** (`spark-worker`) — 1 replica, 2 cores, 1 GB memory
+- **Spark Streaming Submit** (`spark-streaming-submit`) — init container that `spark-submit`s the PySpark job and exits
+- **`stream_processing.py`** — fully implemented PySpark structured streaming job with 3 concurrent queries:
+  1. `redis-hot-path` — 1-minute windowed aggregations → Redis (30s trigger, `update` mode)
+  2. `iceberg-enriched-events` — stream-stream join enriched events → Iceberg `ebap.events_db.enriched_events` (60s trigger, `append` mode)
+  3. `iceberg-windowed-metrics` — 1-hour windowed metrics → Iceberg `ebap.events_db.windowed_metrics` (60s trigger, `append` mode)
+
+### Services
+
+| Service | Container | Image | Ports |
+|---|---|---|---|
+| spark-master-streaming | ebap-spark-master-streaming | `custom-spark:latest` | `8082` (Spark UI), `7077` (master port) |
+| spark-worker | ebap-spark-worker | `custom-spark:latest` | — |
+| spark-streaming-submit | ebap-spark-streaming-submit | `custom-spark:latest` | — (exits after submit) |
+
+### Dockerfile Layers (custom-spark:latest)
+
+| Layer | What it installs |
+|---|---|
+| Base | `apache/spark:3.5.3-python3` |
+| apt | `curl`, `pip3` |
+| Python redis | `redis==5.2.1` (for `foreachBatch` sink) |
+| Iceberg runtime | `iceberg-spark-runtime-3.5_2.12-1.7.1.jar` |
+| Kafka JARs | `spark-sql-kafka-*`, `kafka-clients-*` |
+| S3A JARs | `hadoop-aws-*`, `aws-java-sdk-bundle-*` |
+| PostgreSQL JDBC | `postgresql-42.7.10.jar` |
+| spark-redis | `spark-redis_2.12-3.1.0-jar-with-dependencies.jar` |
+| iceberg-aws-bundle | `iceberg-aws-bundle-1.7.1.jar` (provides `S3FileIO`) |
+
+### Iceberg Catalog Setup
+
+- **Catalog name:** `ebap`
+- **Catalog implementation:** `org.apache.iceberg.jdbc.JdbcCatalog`
+- **JDBC URI:** `jdbc:postgresql://postgres:5432/iceberg_catalog`
+- **Warehouse:** `s3a://ebap-silver/`
+- **IO implementation:** `org.apache.iceberg.aws.s3.S3FileIO`
+- **Tables bootstrapped at startup:**
+  - `ebap.events_db.enriched_events` — partitioned by `days(event_ts), region`
+  - `ebap.events_db.windowed_metrics` — partitioned by `days(window_start), region`
+
+### Streaming Job Architecture
+
+```
+Kafka: ebap.events.raw      →  parse EVENT_SCHEMA  →  withWatermark("event_ts", "10 min")
+                                                                    ↓
+Kafka: ebap.cdc.users        →  parse Debezium envelope  →  withWatermark("cdc_ts", "10 min")
+                                                                    ↓
+                                            stream-stream inner join on user_id
+                                                                    ↓
+                          ┌──────────────────────────────────────────────────────┐
+                          │   enriched_df                                         │
+                          │   (event_id, user_id_hashed, action, amount, item_id, │
+                          │    location, region, plan, event_ts, ingest_ts)        │
+                          └──────────────────────────────────────────────────────┘
+                                                ↓ iceberg-enriched-events query
+                                       MERGE INTO ebap.events_db.enriched_events
+
+Kafka: ebap.events.raw  →  groupBy(window, region, action)  →  count + sum(amount)
+                            window("1m")  →  redis-hot-path  →  Redis keys (24h TTL)
+                            window("1h")  →  iceberg-windowed-metrics  →  append to Iceberg
+```
+
+### Redis Keys Written
+
+| Key Pattern | Description |
+|---|---|
+| `kpi:active_users` | Total event count in last 1-minute window |
+| `kpi:purchase_count` | Purchase action count in last 1-minute window |
+| `kpi:total_revenue` | Sum of purchase amounts (float, 2 decimal places) |
+| `kpi:last_updated` | ISO-8601 timestamp of last Redis write |
+| `region:{region}:event_count` | Event count per AWS region |
+| `region:{region}:health_intensity` | 0-100 load proxy (capped at 1000 events/min = 100) |
+| `region:{region}:revenue` | Revenue per region |
+| `alert:{region}:state` | Alerting state: `Normal` / `Pending` / `Firing` |
+| `alert:{region}:error_rate` | Error rate as float (4 decimal places) |
+
+All keys use 24-hour TTL (`EX 86400`).
+
+### Alerting State Machine
+
+```
+Normal  (error_rate < 5%)
+  → error_rate ≥ 5%  →  Pending (start pending clock)
+  → pending for ≥ 60s  →  Firing
+  → error_rate drops back < 5%  →  Normal (pending clock reset)
+```
+
+### How to Run
+
+```bash
+docker compose up -d
+# Wait for all init containers to finish (kafka-init, minio-init, debezium-init)
+# spark-streaming-submit will auto-submit the job and exit
+# Streaming queries run inside spark-master-streaming / spark-worker
+docker logs ebap-spark-streaming-submit    # check submit logs
+docker logs ebap-spark-master-streaming    # check Spark master
+```
+
+### How to Verify
+
+```bash
+# Spark UI
+open http://localhost:8082
+
+# Check streaming queries are running (should show 3 active queries)
+docker logs --tail 50 ebap-spark-streaming-submit
+
+# Produce test events to trigger Redis writes
+docker exec -i ebap-kafka kafka-console-producer \
+  --bootstrap-server kafka:9092 \
+  --topic ebap.events.raw <<'EOF'
+{"id":"evt-001","user_id":"usr_001","action":"purchase","metadata":{"amount":"99.99","item_id":"item-123"},"location":"us-east-1","timestamp":"2026-02-18T12:00:00Z"}
+{"id":"evt-002","user_id":"usr_002","action":"view","metadata":{},"location":"us-east-1","timestamp":"2026-02-18T12:00:30Z"}
+EOF
+
+# Check Redis keys after ~30 seconds
+docker exec ebap-redis redis-cli KEYS "kpi:*"
+docker exec ebap-redis redis-cli GET kpi:active_users
+docker exec ebap-redis redis-cli GET kpi:total_revenue
+docker exec ebap-redis redis-cli KEYS "region:*"
+docker exec ebap-redis redis-cli GET "region:us-east-1:event_count"
+
+# Check Iceberg metadata in MinIO
+docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
+  -c "mc alias set m http://minio:9000 admin password && mc ls --recursive m/ebap-silver/"
+
+# Check Iceberg tables in PostgreSQL catalog
+docker exec ebap-postgres psql -U admin -d iceberg_catalog -c \
+  "SELECT catalog_name, table_namespace, table_name FROM iceberg_tables;"
+
+# Check checkpoints in MinIO
+docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
+  -c "mc alias set m http://minio:9000 admin password && mc ls m/ebap-checkpoints/streaming/"
+```
+
+### Test Results
+
+- Spark master: healthy, Spark UI accessible at `http://localhost:8082`
+- Spark worker: registered (1 replica, 2 cores, 1 GB)
+- Streaming submit: successfully submitted job; 3 queries started
+- Iceberg bootstrap: both tables (`enriched_events`, `windowed_metrics`) created in PostgreSQL JDBC catalog
+- Iceberg metadata: JSON files visible in `ebap-silver/` (namespace + table metadata)
+- Redis hot path: KPIs written on each 30s micro-batch (e.g., `kpi:active_users`, `kpi:total_revenue`, `region:us-east-1:event_count`, `alert:us-east-1:state = Normal`)
+- Checkpoints: all 3 checkpoint directories active in `ebap-checkpoints/streaming/`
+- Stream-stream join: inner join accumulating state; enriched Parquet files written to `ebap-silver/` once watermark advances past window boundaries

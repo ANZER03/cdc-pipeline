@@ -95,31 +95,32 @@ PostgreSQL serves a **dual role** in this architecture:
 
 ## Phase 5: Stream Processing (Spark Structured Streaming)
 
-- [ ] Update `test/Dockerfile` to include Redis client JAR (`jedis` or `spark-redis`)
-- [ ] Update `test/Dockerfile` to include PostgreSQL JDBC driver (`postgresql-42.x.jar`) for Iceberg JDBC catalog
-- [ ] Add Spark Master service (`custom-spark:latest`)
-  - [ ] Run as Spark master node
-  - [ ] Expose Spark UI on port `8080`
-  - [ ] Configure S3A/MinIO endpoint and credentials via environment
-  - [ ] Configure Iceberg with JDBC catalog:
-    - [ ] `spark.sql.catalog.ebap = org.apache.iceberg.spark.SparkCatalog`
-    - [ ] `spark.sql.catalog.ebap.catalog-impl = org.apache.iceberg.jdbc.JdbcCatalog`
-    - [ ] `spark.sql.catalog.ebap.uri = jdbc:postgresql://postgres:5432/iceberg_catalog`
-    - [ ] `spark.sql.catalog.ebap.jdbc.user = admin`
-    - [ ] `spark.sql.catalog.ebap.jdbc.password = admin`
-    - [ ] `spark.sql.catalog.ebap.warehouse = s3a://ebap-silver/`
-    - [ ] `spark.sql.catalog.ebap.io-impl = org.apache.iceberg.aws.s3.S3FileIO`
-    - [ ] `spark.sql.catalog.ebap.s3.endpoint = http://minio:9000`
-  - [ ] Set `depends_on: [kafka, minio, redis, postgres]` with health conditions
-- [ ] Add Spark Worker service(s) (`custom-spark:latest`)
-  - [ ] Connect to Spark Master
-  - [ ] Scale: `deploy.replicas: 2` (minimum)
-  - [ ] Mount streaming job scripts (`./src/streaming/`)
-- [ ] Create Spark Streaming job submit container
-  - [ ] Submit the structured streaming PySpark job
-  - [ ] Job reads from `ebap.events.raw` and `ebap.cdc.users`
-  - [ ] Dual-write: aggregated metrics → Redis, enriched events → MinIO/Iceberg
-  - [ ] Set checkpoint location to `s3a://ebap-checkpoints/streaming/`
+- [x] Update `Dockerfile` to include Redis client JAR (`spark-redis`)
+- [x] Update `Dockerfile` to include PostgreSQL JDBC driver (`postgresql-42.7.10.jar`) for Iceberg JDBC catalog
+- [x] Update `Dockerfile` to include `iceberg-aws-bundle-1.7.1.jar` (provides `S3FileIO`)
+- [x] Add Spark Master service (`custom-spark:latest`)
+  - [x] Run as Spark master node
+  - [x] Expose Spark UI on port `8082` (host) / `8080` (container)
+  - [x] Configure S3A/MinIO endpoint and credentials via environment
+  - [x] Configure Iceberg with JDBC catalog:
+    - [x] `spark.sql.catalog.ebap = org.apache.iceberg.spark.SparkCatalog`
+    - [x] `spark.sql.catalog.ebap.catalog-impl = org.apache.iceberg.jdbc.JdbcCatalog`
+    - [x] `spark.sql.catalog.ebap.uri = jdbc:postgresql://postgres:5432/iceberg_catalog`
+    - [x] `spark.sql.catalog.ebap.jdbc.user = admin`
+    - [x] `spark.sql.catalog.ebap.jdbc.password = admin`
+    - [x] `spark.sql.catalog.ebap.warehouse = s3a://ebap-silver/`
+    - [x] `spark.sql.catalog.ebap.io-impl = org.apache.iceberg.aws.s3.S3FileIO`
+    - [x] `spark.sql.catalog.ebap.s3.endpoint = http://minio:9000`
+  - [x] Set `depends_on: [kafka, minio, redis, postgres]` with health conditions
+- [x] Add Spark Worker service(s) (`custom-spark:latest`)
+  - [x] Connect to Spark Master
+  - [x] Scale: 1 replica (sufficient for dev)
+  - [x] Mount streaming job scripts (`./src/streaming/`)
+- [x] Create Spark Streaming job submit container
+  - [x] Submit the structured streaming PySpark job
+  - [x] Job reads from `ebap.events.raw` and `ebap.cdc.users`
+  - [x] Dual-write: aggregated metrics → Redis, enriched events → MinIO/Iceberg
+  - [x] Set checkpoint location to `s3a://ebap-checkpoints/streaming/`
 
 ## Phase 6: Batch Processing (Spark Batch Jobs)
 
