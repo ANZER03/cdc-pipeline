@@ -413,6 +413,7 @@ services:
   spark-streaming-submit:
     image: custom-spark:latest
     container_name: ebap-spark-streaming-submit
+    hostname: spark-streaming-submit
     depends_on:
       spark-master-streaming:
         condition: service_healthy
@@ -420,6 +421,8 @@ services:
         condition: service_completed_successfully
       debezium-init:
         condition: service_completed_successfully
+    ports:
+      - "4040:4040"    # Spark Application UI
     volumes:
       - ./src/streaming:/opt/spark/jobs:ro
     environment:
@@ -431,6 +434,9 @@ services:
       /opt/spark/bin/spark-submit
         --master spark://spark-master-streaming:7077
         --name "EBAP-Streaming"
+        --conf spark.ui.port=4040
+        --conf spark.driver.host=spark-streaming-submit
+        --conf spark.driver.bindAddress=0.0.0.0
         --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
         --conf spark.sql.catalog.ebap=org.apache.iceberg.spark.SparkCatalog
         --conf spark.sql.catalog.ebap.catalog-impl=org.apache.iceberg.jdbc.JdbcCatalog

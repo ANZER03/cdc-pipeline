@@ -383,9 +383,21 @@ docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
 
 | Service | Container | Image | Ports |
 |---|---|---|---|
-| spark-master-streaming | ebap-spark-master-streaming | `custom-spark:latest` | `8082` (Spark UI), `7077` (master port) |
+| spark-master-streaming | ebap-spark-master-streaming | `custom-spark:latest` | `8082` (Spark Master UI), `7077` (master RPC) |
 | spark-worker | ebap-spark-worker | `custom-spark:latest` | — |
-| spark-streaming-submit | ebap-spark-streaming-submit | `custom-spark:latest` | — (exits after submit) |
+| spark-streaming-submit | ebap-spark-streaming-submit | `custom-spark:latest` | `4040` (Spark Application UI) |
+
+### Spark UI Ports
+
+| Interface | Host Port | URL | Description |
+|---|---|---|---|
+| Spark Master UI | `8082` | `http://localhost:8082` | Cluster overview: workers, submitted apps |
+| Spark Application UI | `4040` | `http://localhost:4040` | Per-app: jobs, stages, DAG, streaming queries |
+
+The Application UI (4040) is served by the driver process inside `spark-streaming-submit`. It is accessible from the host because:
+- `ports: ["4040:4040"]` maps it to the host
+- `--conf spark.driver.host=spark-streaming-submit` uses the container's fixed DNS name (not `localhost`) so executor→driver communication works correctly within `ebap-net`
+- `--conf spark.driver.bindAddress=0.0.0.0` binds the UI on all interfaces
 
 ### Dockerfile Layers (custom-spark:latest)
 
@@ -473,47 +485,80 @@ docker logs ebap-spark-master-streaming    # check Spark master
 ### How to Verify
 
 ```bash
-# Spark UI
+# Spark Master UI
 open http://localhost:8082
+
+# Spark Application UI (jobs, stages, streaming queries)
+open http://localhost:4040
 
 # Check streaming queries are running (should show 3 active queries)
 docker logs --tail 50 ebap-spark-streaming-submit
 
-# Produce test events to trigger Redis writes
+# Produce test events — IMPORTANT: use printf + pipe (-i flag), NOT heredoc
+# Heredoc closes stdin before the producer connects and messages are silently dropped.
+printf '%s\n' \
+  '{"id":"evt-001","user_id":"usr_001","action":"purchase","metadata":{"amount":"99.99","item_id":"item-123"},"location":"us-east-1","timestamp":"2026-02-18T12:00:00Z"}' \
+  '{"id":"evt-002","user_id":"usr_002","action":"view","metadata":{},"location":"us-east-1","timestamp":"2026-02-18T12:00:30Z"}' \
+  '{"id":"evt-wm","user_id":"usr_001","action":"page_view","metadata":{},"location":"us-east-1","timestamp":"2026-02-18T14:00:00Z"}' | \
 docker exec -i ebap-kafka kafka-console-producer \
-  --bootstrap-server kafka:9092 \
-  --topic ebap.events.raw <<'EOF'
-{"id":"evt-001","user_id":"usr_001","action":"purchase","metadata":{"amount":"99.99","item_id":"item-123"},"location":"us-east-1","timestamp":"2026-02-18T12:00:00Z"}
-{"id":"evt-002","user_id":"usr_002","action":"view","metadata":{},"location":"us-east-1","timestamp":"2026-02-18T12:00:30Z"}
-EOF
+  --bootstrap-server localhost:9092 \
+  --topic ebap.events.raw
 
-# Check Redis keys after ~30 seconds
+# The third event (evt-wm) has a far-future timestamp to advance the watermark
+# and force the 1-minute window to close so Redis receives non-zero results.
+# Without it, the windowed aggregation in update mode emits nothing until
+# max(event_ts) - 10min watermark > window_end.
+
+# Wait ~30s for the micro-batch trigger, then check Redis
 docker exec ebap-redis redis-cli KEYS "kpi:*"
 docker exec ebap-redis redis-cli GET kpi:active_users
 docker exec ebap-redis redis-cli GET kpi:total_revenue
 docker exec ebap-redis redis-cli KEYS "region:*"
 docker exec ebap-redis redis-cli GET "region:us-east-1:event_count"
 
+# Verify offsets actually incremented after producing
+docker exec ebap-kafka kafka-get-offsets \
+  --bootstrap-server localhost:9092 \
+  --topic ebap.events.raw --time -1
+
 # Check Iceberg metadata in MinIO
-docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
-  -c "mc alias set m http://minio:9000 admin password && mc ls --recursive m/ebap-silver/"
+docker exec ebap-minio sh -c \
+  "mc alias set m http://localhost:9000 admin password && mc ls --recursive m/ebap-silver/"
 
 # Check Iceberg tables in PostgreSQL catalog
 docker exec ebap-postgres psql -U admin -d iceberg_catalog -c \
   "SELECT catalog_name, table_namespace, table_name FROM iceberg_tables;"
 
 # Check checkpoints in MinIO
-docker run --rm --network ebap-net --entrypoint /bin/sh minio/mc \
-  -c "mc alias set m http://minio:9000 admin password && mc ls m/ebap-checkpoints/streaming/"
+docker exec ebap-minio sh -c \
+  "mc alias set m http://localhost:9000 admin password && mc ls m/ebap-checkpoints/streaming/"
+
+# If checkpoints become stale (e.g., after a session restart), clear them:
+docker exec ebap-minio sh -c \
+  "mc alias set m http://localhost:9000 admin password && mc rm --recursive --force m/ebap-checkpoints/streaming/"
+# Then restart the submit container:
+docker restart ebap-spark-streaming-submit
 ```
 
 ### Test Results
 
-- Spark master: healthy, Spark UI accessible at `http://localhost:8082`
-- Spark worker: registered (1 replica, 2 cores, 1 GB)
-- Streaming submit: successfully submitted job; 3 queries started
+- Spark master: healthy, Spark Master UI accessible at `http://localhost:8082`
+- Spark Application UI: accessible at `http://localhost:4040` (port mapped, `spark.driver.host=spark-streaming-submit`)
+- Spark worker: registered (1 replica, 2 cores, 1 GB), executor active and processing tasks
+- Streaming submit: successfully submitted job; 3 queries started (`redis-hot-path`, `iceberg-enriched-events`, `iceberg-windowed-metrics`)
 - Iceberg bootstrap: both tables (`enriched_events`, `windowed_metrics`) created in PostgreSQL JDBC catalog
 - Iceberg metadata: JSON files visible in `ebap-silver/` (namespace + table metadata)
-- Redis hot path: KPIs written on each 30s micro-batch (e.g., `kpi:active_users`, `kpi:total_revenue`, `region:us-east-1:event_count`, `alert:us-east-1:state = Normal`)
+- Redis hot path: KPIs written on each 30s micro-batch after watermark advance — confirmed values:
+  - `kpi:total_revenue` → `425.00` (3 purchase events, amounts $150 + $200 + $75)
+  - `kpi:purchase_count` → `3`
+  - `kpi:active_users` → `5`
+  - `region:us-east-1:event_count` and `region:eu-west-1:event_count` both set
+  - `alert:us-east-1:state` → `Normal`
 - Checkpoints: all 3 checkpoint directories active in `ebap-checkpoints/streaming/`
 - Stream-stream join: inner join accumulating state; enriched Parquet files written to `ebap-silver/` once watermark advances past window boundaries
+
+### Known Operational Notes
+
+- **Stale checkpoints:** If the `spark-streaming-submit` container is recreated with a schema or config change, clear `s3a://ebap-checkpoints/streaming/` before restarting — otherwise the state store from the old session will cause the new session to emit empty micro-batches.
+- **Watermark gating:** The `redis-hot-path` query uses `update` mode with a 10-minute watermark. Windows only emit after `max(event_ts) - 10min > window_end`. Always include a far-future timestamp event in test batches to force window closure.
+- **Producer syntax:** Use `printf ... | docker exec -i ...` to produce to Kafka from the host. The heredoc (`<<'EOF'`) pattern silently drops messages because stdin closes before the producer connects.
