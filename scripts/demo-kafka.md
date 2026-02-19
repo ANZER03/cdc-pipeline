@@ -7,7 +7,7 @@ This guide provides step-by-step instructions to test the CDC (Change Data Captu
 To start only the services required for this ingestion demo (PostgreSQL, Kafka, and Debezium), run:
 
 ```bash
-docker-compose up -d \
+docker compose up -d \
   postgres \
   kafka \
   kafka-2 \
@@ -23,7 +23,7 @@ Wait for the containers to be healthy. The `debezium-init` and `kafka-init` cont
 You can track the connector registration progress:
 
 ```bash
-docker-compose logs -f debezium-init
+docker compose logs -f debezium-init
 ```
 
 ## 2. Prerequisites
@@ -31,7 +31,7 @@ docker-compose logs -f debezium-init
 Ensure all services are running:
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 You should see `postgres`, `kafka`, `debezium-connect`, and `kafka-ui` in a healthy state.

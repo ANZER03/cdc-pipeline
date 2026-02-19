@@ -32,7 +32,7 @@ volumes:
   postgres-data:
   redis-data:
   minio-data:
-
+  pgadmin-data:
 services:
 
   # =========================================================================
@@ -220,6 +220,28 @@ services:
       timeout: 10s
       retries: 10
     restart: unless-stopped
+
+  # =========================================================================
+  # PGAdmin — Web UI for PostgreSQL
+  # =========================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: ebap-pgadmin
+    hostname: pgadmin
+    ports:
+      - "8085:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - ebap-net
+    restart: unless-stopped
+
 
   # =========================================================================
   # Debezium Kafka Connect — CDC from PostgreSQL to Kafka
