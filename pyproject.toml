@@ -1,0 +1,42 @@
+[project]
+name = "ebap"
+version = "0.1.0"
+description = "Enterprise Behavioral Analytics Platform — CDC-powered big data pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "redis>=5.2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.0",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pyspark==3.5.3",
+]
+diagrams = [
+    "diagrams>=0.23",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true

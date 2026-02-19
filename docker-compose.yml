@@ -133,7 +133,7 @@ services:
       kafka:
         condition: service_healthy
     volumes:
-      - ./init-scripts/create-topics.sh:/scripts/create-topics.sh:ro
+      - ./init-scripts/kafka/create-topics.sh:/scripts/create-topics.sh:ro
     entrypoint: ["bash", "/scripts/create-topics.sh"]
     networks:
       - ebap-net
@@ -210,8 +210,8 @@ services:
       POSTGRES_DB: ebap_db
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./init-scripts/00-create-databases.sh:/docker-entrypoint-initdb.d/00-create-databases.sh:ro
-      - ./init-scripts/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
+      - ./init-scripts/postgres/00-create-databases.sh:/docker-entrypoint-initdb.d/00-create-databases.sh:ro
+      - ./init-scripts/postgres/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
     networks:
       - ebap-net
     healthcheck:
@@ -266,8 +266,8 @@ services:
       debezium-connect:
         condition: service_healthy
     volumes:
-      - ./init-scripts/register-debezium.sh:/scripts/register-debezium.sh:ro
-      - ./config/debezium/postgres-connector.json:/config/postgres-connector.json:ro
+      - ./init-scripts/debezium/register-connector.sh:/scripts/register-debezium.sh:ro
+      - ./infrastructure/debezium/postgres-connector.json:/config/postgres-connector.json:ro
     entrypoint: ["sh", "/scripts/register-debezium.sh"]
     networks:
       - ebap-net
@@ -347,7 +347,7 @@ services:
   spark-master-streaming:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: infrastructure/docker/spark/Dockerfile
     image: custom-spark:latest
     container_name: ebap-spark-master-streaming
     hostname: spark-master-streaming
@@ -456,7 +456,7 @@ services:
         --conf spark.redis.host=redis
         --conf spark.redis.port=6379
         --conf spark.streaming.stopGracefullyOnShutdown=true
-        /opt/spark/jobs/stream_processing.py
+        /opt/spark/jobs/main.py
     networks:
       - ebap-net
     restart: "no"

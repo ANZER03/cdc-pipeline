@@ -1,7 +1,5 @@
 # Docker volumes / Data paths
 postgres_data/
-mysql1_data/
-mysql2_data/
 
 # Spark / Java
 jars/
@@ -11,6 +9,7 @@ jars/
 # Python / Jupyter
 __pycache__/
 *.pyc
+*.pyo
 .ipynb_checkpoints/
 .virtual_documents/
 
@@ -21,3 +20,22 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+# Python packaging / build
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment variables (never commit secrets)
+.env
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker Compose local overrides
+docker-compose.override.yml
