@@ -10,7 +10,7 @@ Redis key patterns:
   kpi:purchase_count                     → purchase count in last 1m
   kpi:total_revenue                      → sum of purchase amounts in last 1m
   region:{region}:event_count            → event count per region (1m window)
-  region:{region}:health_intensity       → 0-100 load proxy for Grafana geo-map
+  region:{region}:health_intensity       → 0-100 load proxy for App geo-map
   alert:{region}:state                   → Normal / Pending / Firing
 """
 

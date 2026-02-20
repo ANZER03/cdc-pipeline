@@ -17,7 +17,7 @@ from diagrams.onprem.queue import Kafka
 from diagrams.onprem.database import PostgreSQL
 from diagrams.onprem.inmemory import Redis
 from diagrams.onprem.analytics import Spark
-from diagrams.onprem.monitoring import Grafana
+from diagrams.generic.device import Mobile
 from diagrams.onprem.tracing import Jaeger           # placeholder: Schema Registry
 from diagrams.generic.storage import Storage          # placeholder: MinIO / Iceberg
 from diagrams.generic.database import SQL             # placeholder: Trino
@@ -166,15 +166,15 @@ with Diagram(
     # ================================================================
     # 7. VISUALIZATION LAYER
     # ================================================================
-    with Cluster("Visualization — Grafana", graph_attr={
+    with Cluster("Visualization — Web/Mobile Apps & Microservices", graph_attr={
         "bgcolor": "#fffde7", "style": "rounded", "fontsize": "14",
     }):
-        grafana = Grafana("Grafana\n(Single Pane\nof Glass)")
+        apps = Mobile("Web/Mobile Apps\n(Single Pane\nof Glass)")
 
         with Cluster("Dashboard Panels"):
-            panel_live = Grafana("Live Panels\n(5s auto-refresh)")
-            panel_hist = Grafana("Historical Panels\n(1h query cache)")
-            panel_geo  = Grafana("Geo-Map\n(Regional Health)")
+            panel_live = Mobile("Live Panels\n(SSE Stream)")
+            panel_hist = Mobile("Historical Panels\n(API cache)")
+            panel_geo  = Mobile("Geo-Map\n(Regional Health)")
 
     # ================================================================
     # 8. CONSUMERS
@@ -383,18 +383,18 @@ with Diagram(
         color=C_COLD,
     ) >> panel_hist
 
-    panel_live >> Edge(color=C_UI) >> grafana
-    panel_hist >> Edge(color=C_UI) >> grafana
-    panel_geo  >> Edge(color=C_UI) >> grafana
+    panel_live >> Edge(color=C_UI) >> apps
+    panel_hist >> Edge(color=C_UI) >> apps
+    panel_geo  >> Edge(color=C_UI) >> apps
 
     # ── 11. Visualization / Serving → Consumers ──────────────────────
 
-    grafana >> Edge(
+    apps >> Edge(
         label="System health\nalerts & dashboards",
         color=C_UI,
     ) >> devops
 
-    grafana >> Edge(
+    apps >> Edge(
         label="User behavior\nfunnels & KPIs",
         color=C_UI,
     ) >> pm

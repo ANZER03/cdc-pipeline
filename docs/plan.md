@@ -14,7 +14,7 @@
 | MinIO | `minio/minio:latest` |
 | Trino | `trinodb/trino:latest` |
 | Redis | `redis:7-alpine` |
-| Grafana | `grafana/grafana:latest` |
+| Web/Mobile Apps & Microservices | (Custom Apps) |
 
 **Iceberg Catalog Strategy: PostgreSQL JDBC Catalog**
 
@@ -165,21 +165,17 @@ PostgreSQL serves a **dual role** in this architecture:
 - [ ] Validate Trino reads the same Iceberg tables written by Spark (shared JDBC catalog)
 - [ ] Verify namespace and table metadata is visible in `iceberg_catalog` PostgreSQL database
 
-## Phase 8: Visualization (Grafana)
+## Phase 8: Visualization (Web/Mobile Apps & Microservices)
 
-- [ ] Add Grafana service (`grafana/grafana:latest`)
-  - [ ] Expose port `3000`
-  - [ ] Mount provisioning config (`./config/grafana/provisioning/`)
-  - [ ] Set `GF_SECURITY_ADMIN_PASSWORD`
-- [ ] Provision Redis datasource
-  - [ ] Install Redis datasource plugin (`GF_INSTALL_PLUGINS=redis-datasource`)
-  - [ ] Configure connection to `redis:6379`
-- [ ] Provision Trino datasource
-  - [ ] Configure JDBC/SQL connection to `trino:8085`
-- [ ] Create provisioned dashboards:
-  - [ ] Live Panel — real-time KPIs from Redis (5s refresh)
-  - [ ] Historical Panel — trends from Trino (1h cache)
-  - [ ] Geo-Map Panel — regional health from Redis
+- [ ] Add Microservices
+  - [ ] Stream real-time metrics from Redis via SSE
+  - [ ] Expose REST APIs for historical queries via Trino
+- [ ] Add Web/Mobile App frontend
+  - [ ] Connect to SSE stream for live updates (5s refresh)
+  - [ ] Connect to APIs for historical trends (1h cache)
+  - [ ] Render Live Panel (KPIs)
+  - [ ] Render Historical Panel (Trends)
+  - [ ] Render Geo-Map Panel (Regional Health)
 
 ## Phase 9: Init Scripts & Orchestration
 
@@ -191,11 +187,8 @@ PostgreSQL serves a **dual role** in this architecture:
   ├── config/
   │   ├── trino/
   │   │   └── iceberg.properties
-  │   ├── grafana/
-  │   │   └── provisioning/
-  │   │       ├── datasources/
-  │   │       │   └── datasources.yml
-  │   │       └── dashboards/
+  │   ├── apps/
+  │   │   └── config/
   │   └── debezium/
   │       └── postgres-connector.json
   ├── init-scripts/
@@ -221,7 +214,7 @@ PostgreSQL serves a **dual role** in this architecture:
     → spark-batch (needs minio + postgres)
   minio → mc-init
   trino (needs minio + postgres for JDBC catalog)
-  grafana (last, depends on redis + trino)
+  apps & microservices (last, depends on redis + trino)
   ```
 - [ ] Add restart policies (`restart: unless-stopped`) for long-running services
 - [ ] Add named volumes for data persistence:
@@ -229,7 +222,7 @@ PostgreSQL serves a **dual role** in this architecture:
   - [ ] `minio-data`
   - [ ] `postgres-data`
   - [ ] `redis-data`
-  - [ ] `grafana-data`
+  - [ ] `apps-data`
 
 ## Phase 10: Validation & Smoke Tests
 
@@ -238,5 +231,5 @@ PostgreSQL serves a **dual role** in this architecture:
 - [ ] Verify Spark Streaming is consuming from Kafka and writing to Redis + MinIO
 - [ ] Verify Spark Batch reads files and writes to Iceberg/MinIO
 - [ ] Verify Trino can query Iceberg tables
-- [ ] Verify Grafana dashboards display live and historical data
+- [ ] Verify App dashboards display live and historical data via SSE and APIs
 - [ ] Run `docker compose up` end-to-end and confirm all healthchecks pass

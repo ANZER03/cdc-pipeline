@@ -73,11 +73,11 @@
 
 **Goal:** Build the Operational and Analytical dashboards.
 
-1. **Grafana Setup:**
-* **Redis Datasource:** Configure connection for real-time widgets.
-* **Trino Datasource:** Configure connection for historical widgets.
+1. **Microservices & SSE Setup:**
+* **Redis Streamer:** Build a microservice to push real-time metrics via SSE.
+* **API Gateway:** Expose endpoints querying historical data via Trino.
 
 
-2. **Dashboard Creation:**
-* **Real-Time View:** Build "Speedometers" for EPS and "Geomaps" for Regional Health.
-* **Historical View:** Build line charts showing "Daily Active Users" trends over the simulated past.
+2. **Web/Mobile App Dashboard Creation:**
+* **Real-Time View:** Consume SSE to build live "Speedometers" for EPS and "Geomaps" for Regional Health.
+* **Historical View:** Consume APIs to build line charts showing "Daily Active Users" trends.

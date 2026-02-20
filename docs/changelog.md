@@ -14,7 +14,7 @@
 - [Phase 5: Stream Processing](#phase-5-stream-processing)
 - [Phase 6: Batch Processing](#phase-6-batch-processing)
 - [Phase 7: Serving Layer (Trino)](#phase-7-serving-layer-trino)
-- [Phase 8: Visualization (Grafana)](#phase-8-visualization-grafana)
+- [Phase 8: Visualization (Web/Mobile Apps & Microservices)](#phase-8-visualization-webmobile-apps--microservices)
 - [Phase 9: Orchestration](#phase-9-orchestration)
 - [Phase 10: Validation](#phase-10-validation)
 

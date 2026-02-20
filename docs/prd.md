@@ -23,13 +23,13 @@ The platform will support the end-to-end data lifecycle:
 2. **Contextualization:** Enriching raw streams with transactional data (User Profiles) using **Kafka Connect (Debezium CDC)**.
 3. **Processing:** Performing windowed aggregations and stateful anomaly detection using **Spark Structured Streaming**.
 4. **Storage:** Storing governed, acid-compliant datasets in **Apache Iceberg** backed by **MinIO** object storage.
-5. **Access:** Providing SQL access via **Trino** and visualization via **Grafana**.
+5. **Access:** Providing SQL access via **Trino** and visualization via **Web and Mobile Apps** (powered by SSE and microservices).
 
 ### **1.3 High-Level Architecture**
 
 The system operates on three speed layers as defined in the technical specifications:
 
-* **Hot Path (Real-Time):** Kafka  Spark Streaming  Redis  Grafana (Live Dashboards).
+* **Hot Path (Real-Time):** Kafka  Spark Streaming  Redis  Microservices (SSE)  Web/Mobile Apps.
 * **Warm Path (Operational):** Prometheus/Cortex for recent time-series metrics (24h history).
 * **Cold Path (Historical):** Spark Streaming  Apache Iceberg (MinIO)  Trino  BI Tools.
 
@@ -47,7 +47,7 @@ The system operates on three speed layers as defined in the technical specificat
 
 | Metric Category | Target | Description |
 | --- | --- | --- |
-| **Latency (Hot Path)** | **< 60 Seconds** | End-to-end latency from "User Click" to "Grafana Dashboard Update". |
+| **Latency (Hot Path)** | **< 60 Seconds** | End-to-end latency from "User Click" to "App Dashboard Update". |
 | **Query Performance** | **< 3 Seconds** | Average response time for Trino SQL queries on aggregated Iceberg tables. |
 | **Throughput** | **10,000+ EPS** | Capability to handle peak Event Per Second loads without backpressure. |
 | **Data Integrity** | **Exactly-Once** | Zero data loss or duplication for critical "Commerce" events (e.g., `purchase`). |
@@ -175,11 +175,11 @@ EBAP utilizes a modern evolution of the **Lambda Architecture**, combining a low
 * **Role:** Allows Data Analysts to run standard SQL queries against the Iceberg tables in MinIO.
 
 
-* **Visualization:** **Grafana**
+* **Visualization:** **Web/Mobile Apps & Microservices**
 * **Role:** The "Single Pane of Glass."
-* **Dual-Source Dashboards:**
-* *Real-time panels* query **Redis**.
-* *Historical panels* query **Trino**.
+* **Data Delivery:**
+* *Real-time data* streamed to apps via **SSE** from **Redis**.
+* *Historical data* queried from **Trino**.
 
 
 
@@ -258,7 +258,7 @@ Aggregated spatial data used to visualize system load across global regions.
 * **FR-07 (Partitioning):** Data stored in MinIO must be partitioned by `date(timestamp)` and `region` to optimize Trino query performance.
 * **FR-08 (Compaction):** A periodic batch job must run every 6 hours to compact small data files into larger files (target size: 128MB) to maintain read performance.
 
-### **6.4 Visualization (Grafana)**
+### **6.4 Visualization (Web & Mobile Apps)**
 
 * **FR-09 (Real-Time Dashboards):** Panels labeled "Live" must query **Redis** and refresh every 5 seconds.
 * **FR-10 (Historical Dashboards):** Panels labeled "Trends" must query **Trino** and cache results for 1 hour.
@@ -279,7 +279,7 @@ This chapter defines the constraints and quality attributes for the **Enterprise
 The system adheres to a strict "Time-to-Insight" budget across its two speed layers:
 
 * **Hot Path (Real-Time):**
-* **Maximum E2E Latency:** < 60 seconds (from `User Action` to `Grafana Display`).
+* **Maximum E2E Latency:** < 60 seconds (from `User Action` to `App Display`).
 * **P99 Latency:** < 2 seconds for Redis lookups on the "Live Cart" dashboard.
 
 
@@ -322,7 +322,7 @@ Per privacy regulations (GDPR/CCPA), Personally Identifiable Information (PII) m
 
 Access to data is governed by a strict Role-Based Access Control model:
 
-| Role | Grafana Access | Trino/Data Access |
+| Role | App Access | Trino/Data Access |
 | --- | --- | --- |
 | **DevOps** | **Edit** (System Health Dashboards) | **Read-Only** (System Metrics Tables) |
 | **Product Mgr** | **View** (User Behavior Dashboards) | **Deny** (Raw Data) |
@@ -340,7 +340,7 @@ Access to data is governed by a strict Role-Based Access Control model:
 #### **7.3.1 Availability Targets**
 
 * **Ingestion (Kafka):** 99.99% Availability (Multi-AZ deployment).
-* **Serving (Trino/Grafana):** 99.9% Availability (business hours).
+* **Serving (Trino/Apps):** 99.9% Availability (business hours).
 
 #### **7.3.2 Data Retention Policy**
 
@@ -374,8 +374,8 @@ The platform is composed of the following interconnected services:
 | **Spark Master/Worker** | **Processing** | The compute engine. The Master distributes tasks to Workers. Workers need access to both Kafka (for streams) and MinIO (for state/storage). |
 | **MinIO** | **Object Storage** | An S3-compatible object store. It acts as the Data Lake, storing Iceberg tables and Spark Checkpoints. |
 | **Trino** | **Query Engine** | A distributed SQL engine. It connects to MinIO to read Iceberg metadata and data files for analytical queries. |
-| **Redis** | **Hot State** | In-memory key-value store. Spark writes "Live" metrics here; Grafana reads them for real-time dashboards. |
-| **Grafana** | **Visualization** | The frontend UI. It connects to **Redis** (via a Redis Datasource) and **Trino** (via a SQL Datasource). |
+| **Redis** | **Hot State** | In-memory key-value store. Spark writes "Live" metrics here; Microservices stream them to apps via SSE. |
+| **Web/Mobile Apps** | **Visualization** | The frontend UI. Connects to **Redis** via Microservices (SSE) and **Trino** via APIs. |
 
 ### **8.3 Environment Configuration**
 
@@ -395,7 +395,7 @@ All containers operate on a shared bridge network to allow DNS resolution by ser
 
 Once the infrastructure is running, the following interfaces are exposed for management and observability:
 
-1. **Grafana Dashboard:** The primary interface for end-users to view Real-Time and Historical data.
+1. **App Dashboards:** The primary interface for end-users to view Real-Time and Historical data.
 2. **MinIO Console:** A web-based file explorer to inspect raw Parquet files and Iceberg metadata in the Data Lake.
 3. **Spark Master UI:** A dashboard to monitor active streaming jobs, processing rates, and executor memory usage.
 4. **Trino CLI / UI:** A SQL interface for Data Analysts to run ad-hoc queries against the lakehouse.
