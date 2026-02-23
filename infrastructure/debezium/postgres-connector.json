@@ -22,5 +22,6 @@
     "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
     "transforms.route.regex": "ebap\\.cdc\\.public\\.users",
     "transforms.route.replacement": "ebap.cdc.users"
+    
   }
 }
