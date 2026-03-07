@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-scripts/health_check.py
-EBAP — Service health verification.
-
-Checks all EBAP services are reachable and healthy.
-Run with: python scripts/health_check.py
-Or:       make health
-"""
+"""Check the health of the Nexus services exposed locally."""
 
 import sys
 import socket
@@ -37,23 +30,23 @@ def check_http(url: str, label: str) -> bool:
 
 
 def main():
-    print("\nEBAP Health Check\n" + "=" * 40)
+    print("\nNexus Health Check\n" + "=" * 40)
 
     checks = [
-        check_tcp("localhost", 9092,  "Kafka broker 1"),
-        check_tcp("localhost", 9093,  "Kafka broker 2"),
+        check_tcp("localhost", 9092, "Kafka broker 1"),
+        check_tcp("localhost", 9093, "Kafka broker 2"),
         check_http("http://localhost:8081/subjects", "Schema Registry"),
         check_http("http://localhost:8083/connectors", "Debezium Connect"),
-        check_http("http://localhost:8084/api/clusters", "Kafka UI"),
-        check_tcp("localhost", 5432,  "PostgreSQL"),
-        check_tcp("localhost", 6379,  "Redis"),
-        check_http("http://localhost:9000/minio/health/live", "MinIO"),
+        check_tcp("localhost", 8080, "Kafka UI"),
+        check_tcp("localhost", 5432, "PostgreSQL"),
+        check_tcp("localhost", 6379, "Redis"),
         check_http("http://localhost:8082", "Spark Master UI"),
+        check_http("http://localhost:8000/health", "Nexus API"),
     ]
 
     print()
     passed = sum(checks)
-    total  = len(checks)
+    total = len(checks)
     print(f"Result: {passed}/{total} services healthy")
 
     if passed < total:

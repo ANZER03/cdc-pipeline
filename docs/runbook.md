@@ -1,72 +1,64 @@
-# EBAP Pipeline — Essential Commands
+# Nexus Pipeline — Essential Commands
 
-## 1. Build Spark Image
+## 1. Start the Full Stack
 
-```cmd
-docker build -t custom-spark:latest .
+```sh
+docker compose up -d
 ```
 
-## 2. Start Core Services
+## 2. Start Infrastructure Only
 
-```cmd
-docker compose up -d kafka kafka-2 postgres debezium-connect redis minio spark-master-streaming spark-worker minio-init
+```sh
+docker compose up -d kafka-1 kafka-2 schema-registry postgres redis
 ```
 
-## 3. Create Kafka Topics
+## 3. Start CDC Services
 
-```cmd
-docker compose run --rm --no-deps --entrypoint bash kafka-init -lc "tr -d '\r' < /scripts/create-topics.sh | bash"
+```sh
+docker compose up -d debezium-connect debezium-init
 ```
 
-## 4. Register Debezium Connector
+## 4. Start Spark Jobs
 
-```cmd
-docker compose run --rm --no-deps --entrypoint sh debezium-init -c "tr -d '\r' < /scripts/register-debezium.sh | sh"
+```sh
+docker compose up -d spark-master spark-worker spark-job-transactions spark-job-infrastructure spark-job-derived
 ```
 
-## 5. Create Iceberg Catalog Database
+## 5. Start the API
 
-```cmd
-docker exec -it ebap-postgres psql -U admin -d postgres -c "CREATE DATABASE iceberg_catalog OWNER admin;"
+```sh
+docker compose up -d nexus-api
 ```
 
-## 6. Seed PostgreSQL Users Table
+## 6. Generate Test Data
 
-```cmd
-docker exec -i ebap-postgres sh -c "tr -d '\r' < /dev/stdin | psql -U admin -d ebap_db" < init-scripts/seed-postgres.sql
+```sh
+python scripts/generate_test_data.py --mode all --rate 10 --duration 300
 ```
 
-## 7. Produce Test Events
+## 7. Verify Services
 
-```cmd
-(echo {"id":"evt-001","user_id":"usr_001","action":"purchase","metadata":{"amount":"99.99","item_id":"item-123"},"location":"us-east-1","timestamp":"2026-02-18T12:00:00Z"}) | docker exec -i ebap-kafka kafka-console-producer --bootstrap-server localhost:9092 --topic ebap.events.raw
+```sh
+python scripts/health_check.py
 ```
 
-Run the same command again with different `id`/`action`/`amount` values to send more events.
+## 8. Verify Data (Open in Browser)
 
-## 8. Start Spark Streaming Job
-
-```cmd
-docker compose up --no-deps spark-streaming-submit
-```
-
-## 9. Verify Data (Open in Browser)
-
-- Kafka UI: `http://localhost:8084`
+- Kafka UI: `http://localhost:8080`
 - Spark Master: `http://localhost:8082`
-- Spark App: `http://localhost:4040`
-- MinIO: `http://localhost:9001` (login: admin/password)
+- API docs: `http://localhost:8000/docs`
+- PGAdmin: `http://localhost:5050`
 
-## 10. Check Redis KPIs
+## 9. Inspect Redis
 
-```cmd
-docker exec ebap-redis redis-cli GET kpi:total_revenue
+```sh
+docker compose exec redis redis-cli
 ```
 
 ## Stop Everything
 
-```cmd
-docker compose down -v
+```sh
+docker compose down -v --remove-orphans
 ```
 
 ---
@@ -76,8 +68,8 @@ docker compose down -v
 | Error                                       | Fix                                                        |
 | ------------------------------------------- | ---------------------------------------------------------- |
 | `set: illegal option -`                     | Use `tr -d '\r'` to strip CRLF (already in commands above) |
-| `database "iceberg_catalog" does not exist` | Run command #5                                             |
-| `relation "users" already exists`           | Continue (harmless)                                        |
-| Services in `Waiting` state                 | Wait 30 seconds, check: `docker compose ps`                |
+| API restarting repeatedly                   | Check `docker compose logs nexus-api` for import issues    |
+| Kafka topics missing                        | Wait for `kafka-init` to finish, then inspect Kafka UI     |
+| Services in `Waiting` state                 | Wait 30 seconds, then run `docker compose ps`              |
 
-**Last Updated:** 2026-02-18
+**Last Updated:** 2026-03-07

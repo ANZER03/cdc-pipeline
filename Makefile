@@ -1,65 +1,46 @@
-# EBAP — Makefile
-# Unified task runner for the Enterprise Behavioral Analytics Platform.
+# Nexus — Makefile
+# Unified task runner for the Nexus real-time pipeline.
 # Usage: make <target>
 
 .DEFAULT_GOAL := help
-.PHONY: help build up down logs restart \
-        submit-stream stop-stream \
+.PHONY: help build up up-infra up-cdc up-spark up-api down logs restart \
         test-unit test-integration test-e2e lint format \
-        health clean seed-data generate-data
+        health clean generate-data logs-transactions logs-infrastructure logs-derived logs-api redis-cli redis-monitor
 
 # ---------------------------------------------------------------------------
 # Docker image
 # ---------------------------------------------------------------------------
 
-build:  ## Build the custom Spark Docker image
+build:  ## Build the custom Spark image
 	docker build -t custom-spark:latest -f infrastructure/docker/spark/Dockerfile .
 
 # ---------------------------------------------------------------------------
 # Stack lifecycle
 # ---------------------------------------------------------------------------
 
-up:  ## Start all long-running services (detached)
-	docker compose up -d kafka kafka-2 postgres debezium-connect redis minio \
-	    spark-master-streaming spark-worker
+up:  ## Start the full Nexus stack
+	docker compose up -d
+
+up-infra:  ## Start Kafka, schema registry, Postgres, and Redis
+	docker compose up -d kafka-1 kafka-2 schema-registry postgres redis
+
+up-cdc:  ## Start Debezium services
+	docker compose up -d debezium-connect debezium-init
+
+up-spark:  ## Start Spark master, worker, and jobs
+	docker compose up -d spark-master spark-worker spark-job-transactions spark-job-infrastructure spark-job-derived
+
+up-api:  ## Start FastAPI backend
+	docker compose up -d nexus-api
 
 down:  ## Stop all services and remove volumes
-	docker compose down -v
+	docker compose down -v --remove-orphans
 
-restart:  ## Restart all services
+restart:  ## Restart the full stack
 	docker compose down -v && $(MAKE) up
 
 logs:  ## Tail logs for all running services
 	docker compose logs -f
-
-# ---------------------------------------------------------------------------
-# Init containers (one-shot setup)
-# ---------------------------------------------------------------------------
-
-init-kafka:  ## Create Kafka topics
-	docker compose run --rm kafka-init
-
-init-debezium:  ## Register the Debezium CDC connector
-	docker compose run --rm debezium-init
-
-init-minio:  ## Create MinIO lakehouse buckets
-	docker compose run --rm minio-init
-
-init-all: init-minio init-kafka init-debezium  ## Run all init containers in order
-
-# ---------------------------------------------------------------------------
-# Spark streaming job
-# ---------------------------------------------------------------------------
-
-submit-stream:  ## Submit the PySpark structured streaming job
-	docker compose up --no-deps spark-streaming-submit
-
-stop-stream:  ## Stop the streaming submit container
-	docker compose stop spark-streaming-submit
-
-# ---------------------------------------------------------------------------
-# Testing
-# ---------------------------------------------------------------------------
 
 test-unit:  ## Run unit tests (no services required)
 	pytest tests/unit/ -v
@@ -87,25 +68,37 @@ format:  ## Auto-format src/ and tests/ with ruff
 # Operational utilities
 # ---------------------------------------------------------------------------
 
-health:  ## Check health of all running services
+health:  ## Check health of Nexus services
 	python scripts/health_check.py
 
-seed-data:  ## Seed PostgreSQL with sample user data
-	docker exec ebap-postgres psql -U admin -d ebap_db -f /docker-entrypoint-initdb.d/01-seed-postgres.sql
+generate-data:  ## Generate Nexus CDC + Kafka test traffic
+	python scripts/generate_test_data.py --mode all --rate 10 --duration 300
 
-generate-data:  ## Produce synthetic events to Kafka
-	python scripts/generate_test_data.py
+logs-transactions:  ## Tail transaction job logs
+	docker compose logs -f spark-job-transactions
 
-kpi:  ## Check real-time KPIs from Redis
-	docker exec ebap-redis redis-cli GET kpi:total_revenue
-	docker exec ebap-redis redis-cli GET kpi:active_users
+logs-infrastructure:  ## Tail infrastructure job logs
+	docker compose logs -f spark-job-infrastructure
+
+logs-derived:  ## Tail derived job logs
+	docker compose logs -f spark-job-derived
+
+logs-api:  ## Tail API logs
+	docker compose logs -f nexus-api
+
+redis-cli:  ## Open a Redis shell
+	docker compose exec redis redis-cli
+
+redis-monitor:  ## Watch Redis commands in real time
+	docker compose exec redis redis-cli MONITOR
 
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 
-clean:  ## Remove containers, volumes, and locally built images
-	docker compose down -v --rmi local
+clean:  ## Remove containers, volumes, and checkpoints
+	docker compose down -v --remove-orphans
+	rm -rf /tmp/nexus-checkpoints
 
 # ---------------------------------------------------------------------------
 # Help

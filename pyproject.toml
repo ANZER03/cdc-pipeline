@@ -1,10 +1,12 @@
 [project]
-name = "ebap"
+name = "nexus"
 version = "0.1.0"
-description = "Enterprise Behavioral Analytics Platform — CDC-powered big data pipeline"
+description = "Nexus real-time CDC pipeline and dashboard backend"
 requires-python = ">=3.10"
 dependencies = [
     "redis>=5.2.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.6",
 ]
 
 [project.optional-dependencies]
