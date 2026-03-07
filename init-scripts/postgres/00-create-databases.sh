@@ -1,24 +1,20 @@
 #!/bin/bash
-# 00-create-databases.sh
-# Creates additional databases needed by EBAP.
-# This script runs before SQL files because docker-entrypoint-initdb.d
-# sorts files alphabetically (00- < seed-).
-#
-# The default database (ebap_db) is created automatically by POSTGRES_DB env var.
-# Here we create the Iceberg JDBC catalog database.
+# Creates the application and future catalog databases for Nexus.
+# This runs before seed-postgres.sql, which reconnects to nexus_db.
 
 set -e
 
-echo "Creating iceberg_catalog database for Iceberg JDBC catalog..."
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-    SELECT 'CREATE DATABASE iceberg_catalog OWNER $POSTGRES_USER'
-    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'iceberg_catalog');
-EOSQL
+create_database() {
+    local db_name="$1"
 
-# Use a simpler approach: createdb with --if-not-exists equivalent
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" -tc \
-    "SELECT 1 FROM pg_database WHERE datname = 'iceberg_catalog'" | grep -q 1 || \
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" -c \
-    "CREATE DATABASE iceberg_catalog OWNER $POSTGRES_USER"
+    echo "Ensuring ${db_name} database exists..."
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" -tc \
+        "SELECT 1 FROM pg_database WHERE datname = '${db_name}'" | grep -q 1 || \
+        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" -c \
+        "CREATE DATABASE ${db_name} OWNER $POSTGRES_USER"
+}
 
-echo "iceberg_catalog database ready."
+create_database "nexus_db"
+create_database "iceberg_catalog"
+
+echo "Databases ready: nexus_db, iceberg_catalog."
