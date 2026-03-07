@@ -6,7 +6,34 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
-from streaming.config import ALERT_RULES, CHECKPOINT_BASE, TRIGGER_DERIVED
+from streaming.config import (
+    ALERT_RULES,
+    CHANNEL_ALERTS,
+    CHECKPOINT_BASE,
+    REDIS_KEY_ALERT_RULES,
+    REDIS_KEY_ALERT_SUMMARY,
+    TRIGGER_DERIVED,
+)
+from streaming.redis_client import NexusRedisWriter
+
+
+def write_alert_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.collect()
+    if not rows:
+        return
+
+    payload = [row.asDict(recursive=True) for row in rows]
+    summary = {
+        "criticalCount": sum(1 for row in payload if row["severity"] == "critical"),
+        "warningCount": sum(1 for row in payload if row["severity"] == "warning"),
+        "healthyCount": sum(1 for row in payload if row["status"] == "ok"),
+        "criticalImpact": "Currently affecting 0% of users",
+        "updatedAt": payload[0]["lastEvaluated"],
+    }
+    writer = NexusRedisWriter()
+    writer.write_json(REDIS_KEY_ALERT_RULES, payload, channel=CHANNEL_ALERTS)
+    writer.write_hash(REDIS_KEY_ALERT_SUMMARY, summary)
 
 
 def build_alert_frame(kpis_stream: DataFrame) -> DataFrame:
@@ -38,8 +65,7 @@ def start_alert_evaluator(kpis_stream: DataFrame) -> StreamingQuery:
     frame = build_alert_frame(kpis_stream)
     return (
         frame.writeStream.outputMode("complete")
-        .format("memory")
-        .queryName("nexus_alert_evaluator")
+        .foreachBatch(write_alert_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/alerts")
         .trigger(processingTime=TRIGGER_DERIVED)
         .start()

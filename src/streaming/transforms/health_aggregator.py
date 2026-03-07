@@ -7,11 +7,24 @@ from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from streaming.config import (
+    CHANNEL_HEALTH,
     CHECKPOINT_BASE,
     HEALTH_SLIDE_INTERVAL,
     HEALTH_WINDOW_DURATION,
+    REDIS_KEY_HEALTH_CURRENT,
     TRIGGER_INFRASTRUCTURE,
 )
+from streaming.redis_client import NexusRedisWriter
+
+
+def write_health_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.orderBy(F.col("updatedAt").desc()).limit(1).collect()
+    if not rows:
+        return
+
+    payload = rows[0].asDict(recursive=True)
+    NexusRedisWriter().write_hash(REDIS_KEY_HEALTH_CURRENT, payload, channel=CHANNEL_HEALTH)
 
 
 def build_health_frame(system_metrics_df: DataFrame) -> DataFrame:
@@ -41,8 +54,7 @@ def start_health_aggregator(system_metrics_df: DataFrame) -> StreamingQuery:
     frame = build_health_frame(system_metrics_df)
     return (
         frame.writeStream.outputMode("complete")
-        .format("memory")
-        .queryName("nexus_health_aggregator")
+        .foreachBatch(write_health_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/health")
         .trigger(processingTime=TRIGGER_INFRASTRUCTURE)
         .start()

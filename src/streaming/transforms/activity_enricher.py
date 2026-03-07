@@ -6,7 +6,25 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
-from streaming.config import CHECKPOINT_BASE, TRIGGER_TRANSACTIONS
+from streaming.config import (
+    CHANNEL_ACTIVITY,
+    CHECKPOINT_BASE,
+    REDIS_KEY_ACTIVITY_FEED,
+    TRIGGER_TRANSACTIONS,
+)
+from streaming.redis_client import NexusRedisWriter
+
+
+def write_activity_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.orderBy(F.col("timestamp").desc()).limit(15).collect()
+    if not rows:
+        return
+
+    writer = NexusRedisWriter()
+    for row in reversed(rows):
+        payload = row.asDict(recursive=True)
+        writer.push_to_list(REDIS_KEY_ACTIVITY_FEED, payload, max_len=15, channel=CHANNEL_ACTIVITY)
 
 
 def build_activity_feed(
@@ -64,8 +82,7 @@ def start_activity_enricher(
     frame = build_activity_feed(user_events_df, users_df, orders_df)
     return (
         frame.writeStream.outputMode("append")
-        .format("memory")
-        .queryName("nexus_activity_enricher")
+        .foreachBatch(write_activity_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/activity")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()

@@ -7,11 +7,70 @@ from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from streaming.config import (
+    CHANNEL_FLOWS,
+    CHANNEL_REGIONS,
     CHECKPOINT_BASE,
+    REDIS_KEY_FLOWS_CURRENT,
+    REDIS_KEY_REGIONS_CURRENT,
+    REGIONS,
     REGION_SLIDE_INTERVAL,
     REGION_WINDOW_DURATION,
     TRIGGER_TRANSACTIONS,
 )
+from streaming.redis_client import NexusRedisWriter
+
+
+REGION_COORDS = {region["name"]: region["coords"] for region in REGIONS}
+
+
+def write_region_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.collect()
+    if not rows:
+        return
+
+    latest_window_end = max(row["window"]["end"] for row in rows)
+
+    payload = []
+    for row in rows:
+        item = row.asDict(recursive=True)
+        if item["window"]["end"] != latest_window_end:
+            continue
+        region_name = str(item["region_name"])
+        payload.append(
+            {
+                "name": region_name,
+                "coords": REGION_COORDS.get(region_name, [0, 0]),
+                "intensity": round(float(item["intensity"] or 0.0), 1),
+                "sales": round(float(item["sales"] or 0.0), 2),
+            }
+        )
+
+    payload.sort(key=lambda entry: entry["name"])
+    NexusRedisWriter().write_json(REDIS_KEY_REGIONS_CURRENT, payload, channel=CHANNEL_REGIONS)
+
+
+def write_flow_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.orderBy(F.col("id").desc()).limit(5).collect()
+    if not rows:
+        return
+
+    payload = []
+    for row in rows:
+        item = row.asDict(recursive=True)
+        source = str(item["source_region"])
+        target = str(item["target_region"])
+        payload.append(
+            {
+                "id": str(item["id"]),
+                "source": REGION_COORDS.get(source, [0, 0]),
+                "target": REGION_COORDS.get(target, [0, 0]),
+                "value": round(float(item["value"] or 0.0), 1),
+            }
+        )
+
+    NexusRedisWriter().write_json(REDIS_KEY_FLOWS_CURRENT, payload, channel=CHANNEL_FLOWS)
 
 
 def build_region_snapshot(orders_df: DataFrame, request_log_df: DataFrame) -> DataFrame:
@@ -64,16 +123,14 @@ def start_region_aggregator(
     flows = build_flow_snapshot(orders_df, products_df)
     region_query = (
         regions.writeStream.outputMode("complete")
-        .format("memory")
-        .queryName("nexus_region_aggregator")
+        .foreachBatch(write_region_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/regions")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()
     )
     flow_query = (
         flows.writeStream.outputMode("append")
-        .format("memory")
-        .queryName("nexus_flow_aggregator")
+        .foreachBatch(write_flow_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/flows")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()

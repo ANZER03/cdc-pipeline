@@ -2,16 +2,87 @@
 
 from __future__ import annotations
 
-from pyspark.sql import DataFrame
+from typing import Any, cast
+
+from pyspark.sql import DataFrame, Row
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from streaming.config import (
     CHECKPOINT_BASE,
+    CHANNEL_KPI,
     KPI_SLIDE_INTERVAL,
     KPI_WINDOW_DURATION,
+    REDIS_KEY_KPI_CURRENT,
+    REDIS_KEY_KPI_SNAPSHOT,
     TRIGGER_TRANSACTIONS,
 )
+from streaming.redis_client import NexusRedisWriter
+
+
+def _current_epoch_hour(updated_at_ms: int) -> int:
+    return updated_at_ms // 3_600_000
+
+
+def _previous_epoch_hour(updated_at_ms: int) -> int:
+    return max(_current_epoch_hour(updated_at_ms) - 1, 0)
+
+
+def _compute_trend(current: float, previous: float | None) -> float:
+    if previous in (None, 0):
+        return 0.0
+    return round(((current - previous) / previous) * 100.0, 1)
+
+
+def _serialize_kpi_row(row: Row) -> dict[str, float | int]:
+    data = cast(dict[str, Any], row.asDict(recursive=True))
+    return {
+        "activeUsers": int(data["activeUsers"] or 0),
+        "revenue": round(float(data["revenue"] or 0.0), 2),
+        "orders": int(data["orders"] or 0),
+        "errorRate": round(float(data["errorRate"] or 0.0), 2),
+        "latency": int(data["latency"] or 0),
+        "updatedAt": int(data["updatedAt"]),
+    }
+
+
+def write_kpi_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.orderBy(F.col("updatedAt").desc()).limit(1).collect()
+    if not rows:
+        return
+
+    writer = NexusRedisWriter()
+    current = _serialize_kpi_row(rows[0])
+    updated_at = int(current["updatedAt"])
+    current_hour = _current_epoch_hour(updated_at)
+    snapshot_key = REDIS_KEY_KPI_SNAPSHOT.format(epoch_hour=current_hour)
+    previous_snapshot_key = REDIS_KEY_KPI_SNAPSHOT.format(
+        epoch_hour=_previous_epoch_hour(updated_at)
+    )
+    previous = writer.read_hash(previous_snapshot_key)
+
+    payload = {
+        **current,
+        "activeUsersTrend": _compute_trend(
+            current["activeUsers"], _as_float(previous.get("activeUsers"))
+        ),
+        "revenueTrend": _compute_trend(current["revenue"], _as_float(previous.get("revenue"))),
+        "ordersTrend": _compute_trend(current["orders"], _as_float(previous.get("orders"))),
+        "errorRateTrend": _compute_trend(
+            current["errorRate"], _as_float(previous.get("errorRate"))
+        ),
+        "latencyTrend": _compute_trend(current["latency"], _as_float(previous.get("latency"))),
+    }
+
+    writer.write_hash(REDIS_KEY_KPI_CURRENT, payload, channel=CHANNEL_KPI)
+    writer.write_hash(snapshot_key, current, ttl=7200)
+
+
+def _as_float(value: str | None) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def build_kpi_frame(
@@ -65,15 +136,10 @@ def build_kpi_frame(
         .select(
             F.col("window"),
             F.col("activeUsers"),
-            F.lit(0.0).alias("activeUsersTrend"),
             F.col("revenue"),
-            F.lit(0.0).alias("revenueTrend"),
             F.col("orders"),
-            F.lit(0.0).alias("ordersTrend"),
             F.col("errorRate"),
-            F.lit(0.0).alias("errorRateTrend"),
             F.coalesce(F.col("latency"), F.lit(0)).cast("long").alias("latency"),
-            F.lit(0.0).alias("latencyTrend"),
             (F.col("window.end").cast("double") * 1000).cast("long").alias("updatedAt"),
         )
     )
@@ -85,8 +151,7 @@ def start_kpi_aggregator(
     frame = build_kpi_frame(orders_df, sessions_df, request_log_df)
     return (
         frame.writeStream.outputMode("update")
-        .format("memory")
-        .queryName("nexus_kpi_aggregator")
+        .foreachBatch(write_kpi_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/kpi")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()

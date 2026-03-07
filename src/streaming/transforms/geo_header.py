@@ -7,11 +7,24 @@ from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from streaming.config import (
+    CHANNEL_GEO,
     CHECKPOINT_BASE,
     GEO_SLIDE_INTERVAL,
     GEO_WINDOW_DURATION,
+    REDIS_KEY_GEO_HEADER,
     TRIGGER_INFRASTRUCTURE,
 )
+from streaming.redis_client import NexusRedisWriter
+
+
+def write_geo_batch(batch_df: DataFrame, batch_id: int) -> None:
+    del batch_id
+    rows = batch_df.orderBy(F.col("updatedAt").desc()).limit(1).collect()
+    if not rows:
+        return
+
+    payload = rows[0].asDict(recursive=True)
+    NexusRedisWriter().write_hash(REDIS_KEY_GEO_HEADER, payload, channel=CHANNEL_GEO)
 
 
 def build_geo_header(system_metrics_df: DataFrame, request_log_df: DataFrame) -> DataFrame:
@@ -38,8 +51,7 @@ def start_geo_header_aggregator(
     frame = build_geo_header(system_metrics_df, request_log_df)
     return (
         frame.writeStream.outputMode("complete")
-        .format("memory")
-        .queryName("nexus_geo_header")
+        .foreachBatch(write_geo_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/geo")
         .trigger(processingTime=TRIGGER_INFRASTRUCTURE)
         .start()
