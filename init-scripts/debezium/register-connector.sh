@@ -5,6 +5,7 @@
 set -e
 
 CONNECT_URL="http://debezium-connect:8083"
+CONNECTOR_NAME="nexus-postgres-cdc"
 CONNECTOR_CONFIG="/config/postgres-connector.json"
 MAX_WAIT=120
 WAITED=0
@@ -21,10 +22,10 @@ done
 echo "Kafka Connect is ready (waited ${WAITED}s)."
 
 # Check if connector already exists
-if curl -sf "$CONNECT_URL/connectors/ebap-postgres-cdc" > /dev/null 2>&1; then
-  echo "Connector 'ebap-postgres-cdc' already exists. Skipping registration."
+if curl -sf "$CONNECT_URL/connectors/$CONNECTOR_NAME" > /dev/null 2>&1; then
+  echo "Connector '$CONNECTOR_NAME' already exists. Skipping registration."
 else
-  echo "Registering Debezium connector..."
+  echo "Registering Debezium connector '$CONNECTOR_NAME'..."
   RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$CONNECT_URL/connectors" \
     -H "Content-Type: application/json" \
     -d @"$CONNECTOR_CONFIG")

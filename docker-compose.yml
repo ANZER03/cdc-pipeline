@@ -1,167 +1,106 @@
-###############################################################################
-# EBAP — Docker Compose (Phase 5: Stream Processing)
-#
-# Services:
-#   - kafka                    : Kafka broker 1 in KRaft mode (no Zookeeper)
-#   - kafka-2                  : Kafka broker 2 (cluster node)
-#   - kafka-init               : Init container that creates EBAP topics
-#   - kafka-ui                 : Web UI for Kafka topics, messages, and consumers
-#   - schema-registry          : Confluent Schema Registry (Avro/JSON/Protobuf)
-#   - postgres                 : PostgreSQL (CDC source + Iceberg JDBC catalog)
-#   - debezium-connect         : Debezium Kafka Connect for CDC
-#   - debezium-init            : Init container that registers Debezium connector
-#   - redis                    : Redis (hot storage for real-time metrics)
-#   - minio                    : MinIO (S3-compatible cold storage / data lakehouse)
-#   - minio-init               : Init container that creates lakehouse buckets
-#   - spark-master-streaming   : Spark master for structured streaming jobs
-#   - spark-worker             : Spark worker (1 replica)
-#   - spark-streaming-submit   : Init container that submits the streaming job
-#
-# Network:
-#   - ebap-net     : Shared bridge network for all services
-###############################################################################
-
-networks:
-  ebap-net:
-    driver: bridge
-    name: ebap-net
-
-volumes:
-  kafka-data:
-  kafka-2-data:
-  postgres-data:
-  redis-data:
-  minio-data:
-  pgadmin-data:
 services:
-
-  # =========================================================================
-  # Kafka Broker 1 (KRaft Mode — No Zookeeper)
-  # =========================================================================
-  kafka:
+  kafka-1:
     image: confluentinc/cp-kafka:7.7.7
-    container_name: ebap-kafka
-    hostname: kafka
+    container_name: nexus-kafka-1
+    hostname: kafka-1
     ports:
-      - "9092:9092"       # External access (host machine)
-      - "29092:29092"     # Internal access (containers)
+      - "9092:9092"
     environment:
-      # --- KRaft Configuration ---
       KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093,2@kafka-2:29093'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-
-      # --- Listeners ---
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-
-      # --- Topic Defaults ---
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:29093,2@kafka-2:29093"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-
-      # --- Log Retention ---
-      KAFKA_LOG_RETENTION_HOURS: 168           # 7 days
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824      # 1 GB segments
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
-      - kafka-data:/var/lib/kafka/data
+      - kafka-1-data:/var/lib/kafka/data
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-1:9092 --list >/dev/null 2>&1"]
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
-  # =========================================================================
-  # Kafka Broker 2 (KRaft Mode — Cluster Test Node)
-  # =========================================================================
   kafka-2:
     image: confluentinc/cp-kafka:7.7.7
-    container_name: ebap-kafka-2
+    container_name: nexus-kafka-2
     hostname: kafka-2
     ports:
-      - "9093:9092"       # External access (host machine)
-      - "29094:29092"     # Internal access (containers)
+      - "9093:9093"
     environment:
-      # --- KRaft Configuration ---
       KAFKA_NODE_ID: 2
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093,2@kafka-2:29093'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-
-      # --- Listeners ---
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-2:9092,PLAINTEXT_HOST://localhost:29094'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-
-      # --- Topic Defaults ---
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:29093,2@kafka-2:29093"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9093,CONTROLLER://0.0.0.0:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9093"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-
-      # --- Log Retention ---
-      KAFKA_LOG_RETENTION_HOURS: 168           # 7 days
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824      # 1 GB segments
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
       - kafka-2-data:/var/lib/kafka/data
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-2:9092 --list"]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-2:9093 --list >/dev/null 2>&1"]
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
-  # =========================================================================
-  # Kafka Init — Creates EBAP topics on startup
-  # =========================================================================
   kafka-init:
     image: confluentinc/cp-kafka:7.7.7
-    container_name: ebap-kafka-init
+    container_name: nexus-kafka-init
     depends_on:
-      kafka:
+      kafka-1:
         condition: service_healthy
+      kafka-2:
+        condition: service_started
     volumes:
       - ./init-scripts/kafka/create-topics.sh:/scripts/create-topics.sh:ro
     entrypoint: ["bash", "/scripts/create-topics.sh"]
     networks:
-      - ebap-net
+      - nexus-net
     restart: "no"
 
-  # =========================================================================
-  # Kafka UI — Web dashboard for topics, messages, consumers, and schemas
-  # =========================================================================
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    container_name: ebap-kafka-ui
+    container_name: nexus-kafka-ui
     hostname: kafka-ui
     ports:
-      - "8084:8080"
+      - "8080:8080"
     environment:
-      KAFKA_CLUSTERS_0_NAME: 'ebap'
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka:9092'
-      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: 'http://schema-registry:8081'
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: 'debezium'
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: 'http://debezium-connect:8083'
-      DYNAMIC_CONFIG_ENABLED: 'true'
+      KAFKA_CLUSTERS_0_NAME: "nexus"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-1:9092,kafka-2:9093"
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://schema-registry:8081"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "debezium"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://debezium-connect:8083"
+      DYNAMIC_CONFIG_ENABLED: "true"
+      SERVER_PORT: 8080
     depends_on:
-      kafka:
+      kafka-1:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/api/clusters || exit 1"]
       interval: 10s
@@ -169,38 +108,34 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # =========================================================================
-  # Schema Registry — Confluent Schema Registry for Avro/JSON/Protobuf
-  # =========================================================================
   schema-registry:
     image: confluentinc/cp-schema-registry:7.7.7
-    container_name: ebap-schema-registry
+    container_name: nexus-schema-registry
     hostname: schema-registry
     ports:
       - "8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
-      SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
-      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: 'BACKWARD'
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "PLAINTEXT://kafka-1:9092,PLAINTEXT://kafka-2:9093"
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: "BACKWARD"
     depends_on:
-      kafka:
+      kafka-1:
         condition: service_healthy
+      kafka-2:
+        condition: service_started
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
-  # =========================================================================
-  # PostgreSQL — CDC Source Database + Iceberg JDBC Catalog
-  # =========================================================================
   postgres:
     image: debezium/postgres:15
-    container_name: ebap-postgres
+    container_name: nexus-postgres
     hostname: postgres
     ports:
       - "5432:5432"
@@ -213,23 +148,20 @@ services:
       - ./init-scripts/postgres/00-create-databases.sh:/docker-entrypoint-initdb.d/00-create-databases.sh:ro
       - ./init-scripts/postgres/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d nexus_db"]
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
-  # =========================================================================
-  # PGAdmin — Web UI for PostgreSQL
-  # =========================================================================
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: ebap-pgadmin
+    container_name: nexus-pgadmin
     hostname: pgadmin
     ports:
-      - "8085:80"
+      - "5050:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@gmail.com
       PGADMIN_DEFAULT_PASSWORD: admin
@@ -239,51 +171,56 @@ services:
     volumes:
       - pgadmin-data:/var/lib/pgadmin
     networks:
-      - ebap-net
+      - nexus-net
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost/misc/ping')\" || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
     restart: unless-stopped
 
-
-  # =========================================================================
-  # Debezium Kafka Connect — CDC from PostgreSQL to Kafka
-  # =========================================================================
   debezium-connect:
-    image: debezium/connect:2.3
-    container_name: ebap-debezium-connect
+    build:
+      context: .
+      dockerfile: infrastructure/docker/debezium/Dockerfile
+    container_name: nexus-debezium-connect
     hostname: debezium-connect
     ports:
       - "8083:8083"
     environment:
-      BOOTSTRAP_SERVERS: 'kafka:9092'
-      GROUP_ID: 'ebap-connect-cluster'
-      CONFIG_STORAGE_TOPIC: 'ebap.connect.configs'
-      OFFSET_STORAGE_TOPIC: 'ebap.connect.offsets'
-      STATUS_STORAGE_TOPIC: 'ebap.connect.statuses'
+      BOOTSTRAP_SERVERS: "kafka-1:9092,kafka-2:9093"
+      GROUP_ID: "nexus-connect-cluster"
+      CONFIG_STORAGE_TOPIC: "nexus.connect.configs"
+      OFFSET_STORAGE_TOPIC: "nexus.connect.offsets"
+      STATUS_STORAGE_TOPIC: "nexus.connect.statuses"
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      KEY_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
-      VALUE_CONVERTER: 'org.apache.kafka.connect.json.JsonConverter'
+      KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      KEY_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
     depends_on:
-      kafka:
+      kafka-1:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
       postgres:
         condition: service_healthy
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
       interval: 10s
       timeout: 10s
-      retries: 15
-      start_period: 30s
+      retries: 20
+      start_period: 20s
     restart: unless-stopped
 
-  # =========================================================================
-  # Debezium Init — Registers the CDC connector after Connect is ready
-  # =========================================================================
   debezium-init:
     image: curlimages/curl:latest
-    container_name: ebap-debezium-init
+    container_name: nexus-debezium-init
     depends_on:
       debezium-connect:
         condition: service_healthy
@@ -292,15 +229,12 @@ services:
       - ./infrastructure/debezium/postgres-connector.json:/config/postgres-connector.json:ro
     entrypoint: ["sh", "/scripts/register-debezium.sh"]
     networks:
-      - ebap-net
+      - nexus-net
     restart: "no"
 
-  # =========================================================================
-  # Redis — Hot Storage for Real-time Metrics
-  # =========================================================================
   redis:
     image: redis:7-alpine
-    container_name: ebap-redis
+    container_name: nexus-redis
     hostname: redis
     ports:
       - "6379:6379"
@@ -308,177 +242,247 @@ services:
     volumes:
       - redis-data:/data
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
-  # =========================================================================
-  # MinIO — Cold Storage / Data Lakehouse (S3 Compatible)
-  # =========================================================================
-  minio:
-    image: minio/minio:latest
-    container_name: ebap-minio
-    hostname: minio
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio-data:/data
-    networks:
-      - ebap-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
-    restart: unless-stopped
-
-  # =========================================================================
-  # MinIO Init — Creates Lakehouse Buckets
-  # =========================================================================
-  minio-init:
-    image: minio/mc:latest
-    container_name: ebap-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set myminio http://minio:9000 admin password; do echo 'Waiting for MinIO...'; sleep 1; done;
-      mc mb --ignore-existing myminio/ebap-bronze;
-      mc mb --ignore-existing myminio/ebap-silver;
-      mc mb --ignore-existing myminio/ebap-gold;
-      mc mb --ignore-existing myminio/ebap-checkpoints;
-      echo 'All EBAP buckets created successfully.';
-      "
-    networks:
-      - ebap-net
-    restart: "no"
-
-  # =========================================================================
-  # Spark Master — Streaming (Phase 5)
-  # =========================================================================
-  spark-master-streaming:
+  spark-master:
     build:
       context: .
       dockerfile: infrastructure/docker/spark/Dockerfile
-    image: custom-spark:latest
-    container_name: ebap-spark-master-streaming
-    hostname: spark-master-streaming
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    container_name: nexus-spark-master
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master --port 7077 --webui-port 8080
     ports:
-      - "8082:8080"    # Spark Web UI
-      - "7077:7077"    # Spark master port (workers connect here)
+      - "8082:8080"
+      - "7077:7077"
     environment:
-      SPARK_MASTER_HOST: spark-master-streaming
-      SPARK_MASTER_PORT: 7077
-      SPARK_MASTER_WEBUI_PORT: 8080
-      # --- S3A / MinIO ---
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: password
-      AWS_REGION: us-east-1
-      # --- Spark conf defaults (picked up by submitted jobs) ---
-      SPARK_CONF_DIR: /opt/spark/conf
-    depends_on:
-      kafka:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+      SPARK_NO_DAEMONIZE: "true"
     networks:
-      - ebap-net
+      - nexus-net
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 10
-      start_period: 20s
     restart: unless-stopped
 
-  # =========================================================================
-  # Spark Worker — Streaming (Phase 5)
-  # =========================================================================
   spark-worker:
-    image: custom-spark:latest
-    container_name: ebap-spark-worker
+    build:
+      context: .
+      dockerfile: infrastructure/docker/spark/Dockerfile
+    container_name: nexus-spark-worker
     hostname: spark-worker
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master-streaming:7077
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     environment:
-      SPARK_WORKER_CORES: 2
-      SPARK_WORKER_MEMORY: 1g
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: 3
+      SPARK_WORKER_MEMORY: 2g
       SPARK_WORKER_WEBUI_PORT: 8081
-      # --- S3A / MinIO ---
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: password
-      AWS_REGION: us-east-1
     depends_on:
-      spark-master-streaming:
+      spark-master:
         condition: service_healthy
     networks:
-      - ebap-net
+      - nexus-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
     restart: unless-stopped
 
-  # =========================================================================
-  # Spark Streaming Submit — Submits the PySpark streaming job (Phase 5)
-  # =========================================================================
-  spark-streaming-submit:
-    image: custom-spark:latest
-    container_name: ebap-spark-streaming-submit
-    hostname: spark-streaming-submit
+  spark-job-transactions:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/spark/Dockerfile
+    container_name: nexus-spark-job-transactions
+    hostname: spark-job-transactions
     depends_on:
-      spark-master-streaming:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
       debezium-init:
         condition: service_completed_successfully
-    ports:
-      - "4040:4040"    # Spark Application UI
+      redis:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
     volumes:
-      - ./src/streaming:/opt/spark/jobs:ro
+      - ./src:/opt/nexus/src:ro
     environment:
-      # --- S3A / MinIO ---
-      AWS_ACCESS_KEY_ID: admin
-      AWS_SECRET_ACCESS_KEY: password
-      AWS_REGION: us-east-1
-    entrypoint: >
-      /opt/spark/bin/spark-submit
-        --master spark://spark-master-streaming:7077
-        --name "EBAP-Streaming"
-        --conf spark.ui.port=4040
-        --conf spark.driver.host=spark-streaming-submit
-        --conf spark.driver.bindAddress=0.0.0.0
-        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
-        --conf spark.sql.catalog.ebap=org.apache.iceberg.spark.SparkCatalog
-        --conf spark.sql.catalog.ebap.catalog-impl=org.apache.iceberg.jdbc.JdbcCatalog
-        --conf spark.sql.catalog.ebap.uri=jdbc:postgresql://postgres:5432/iceberg_catalog
-        --conf spark.sql.catalog.ebap.jdbc.user=admin
-        --conf spark.sql.catalog.ebap.jdbc.password=admin
-        --conf spark.sql.catalog.ebap.warehouse=s3a://ebap-silver/
-        --conf spark.sql.catalog.ebap.io-impl=org.apache.iceberg.aws.s3.S3FileIO
-        --conf spark.sql.catalog.ebap.s3.endpoint=http://minio:9000
-        --conf spark.sql.catalog.ebap.s3.path-style-access=true
-        --conf spark.sql.catalog.ebap.s3.region=us-east-1
-        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
-        --conf spark.hadoop.fs.s3a.access.key=admin
-        --conf spark.hadoop.fs.s3a.secret.key=password
-        --conf spark.hadoop.fs.s3a.path.style.access=true
-        --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
-        --conf spark.redis.host=redis
-        --conf spark.redis.port=6379
-        --conf spark.streaming.stopGracefullyOnShutdown=true
-        /opt/spark/jobs/main.py
+      PYTHONPATH: /opt/nexus/src
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    entrypoint:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - nexus-transactions
+      - --total-executor-cores
+      - "1"
+      - --executor-cores
+      - "1"
+      - --executor-memory
+      - 512M
+      - --conf
+      - spark.ui.enabled=false
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --conf
+      - spark.driver.host=spark-job-transactions
+      - --conf
+      - spark.sql.avro.schemaRegistryUrl=http://schema-registry:8081
+      - --conf
+      - spark.redis.host=redis
+      - --conf
+      - spark.redis.port=6379
+      - --conf
+      - spark.streaming.stopGracefullyOnShutdown=true
+      - /opt/nexus/src/streaming/jobs/transaction_analytics.py
     networks:
-      - ebap-net
-    restart: "no"
+      - nexus-net
+    restart: unless-stopped
+
+  spark-job-infrastructure:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/spark/Dockerfile
+    container_name: nexus-spark-job-infrastructure
+    hostname: spark-job-infrastructure
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    volumes:
+      - ./src:/opt/nexus/src:ro
+    environment:
+      PYTHONPATH: /opt/nexus/src
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    entrypoint:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - nexus-infrastructure
+      - --total-executor-cores
+      - "1"
+      - --executor-cores
+      - "1"
+      - --executor-memory
+      - 512M
+      - --conf
+      - spark.ui.enabled=false
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --conf
+      - spark.driver.host=spark-job-infrastructure
+      - --conf
+      - spark.sql.avro.schemaRegistryUrl=http://schema-registry:8081
+      - --conf
+      - spark.redis.host=redis
+      - --conf
+      - spark.redis.port=6379
+      - --conf
+      - spark.streaming.stopGracefullyOnShutdown=true
+      - /opt/nexus/src/streaming/jobs/infrastructure_analytics.py
+    networks:
+      - nexus-net
+    restart: unless-stopped
+
+  spark-job-derived:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/spark/Dockerfile
+    container_name: nexus-spark-job-derived
+    hostname: spark-job-derived
+    depends_on:
+      debezium-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    volumes:
+      - ./src:/opt/nexus/src:ro
+    environment:
+      PYTHONPATH: /opt/nexus/src
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    entrypoint:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - nexus-derived
+      - --total-executor-cores
+      - "1"
+      - --executor-cores
+      - "1"
+      - --executor-memory
+      - 512M
+      - --conf
+      - spark.ui.enabled=false
+      - --conf
+      - spark.driver.bindAddress=0.0.0.0
+      - --conf
+      - spark.driver.host=spark-job-derived
+      - --conf
+      - spark.sql.avro.schemaRegistryUrl=http://schema-registry:8081
+      - --conf
+      - spark.redis.host=redis
+      - --conf
+      - spark.redis.port=6379
+      - --conf
+      - spark.streaming.stopGracefullyOnShutdown=true
+      - /opt/nexus/src/streaming/jobs/derived_analytics.py
+    networks:
+      - nexus-net
+    restart: unless-stopped
+
+  nexus-api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api/Dockerfile
+    container_name: nexus-api
+    hostname: nexus-api
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - nexus-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  nexus-net:
+    driver: bridge
+    name: nexus-net
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  postgres-data:
+  redis-data:
+  pgadmin-data:

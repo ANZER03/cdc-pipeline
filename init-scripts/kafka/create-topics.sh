@@ -3,7 +3,7 @@
 
 set -e
 
-KAFKA_BOOTSTRAP="kafka:9092"
+KAFKA_BOOTSTRAP="kafka-1:9092"
 
 echo "Waiting for Kafka to be ready..."
 until kafka-topics --bootstrap-server "$KAFKA_BOOTSTRAP" --list > /dev/null 2>&1; do

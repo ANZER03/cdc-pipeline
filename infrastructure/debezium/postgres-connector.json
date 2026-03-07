@@ -1,27 +1,30 @@
 {
-  "name": "ebap-postgres-cdc",
+  "name": "nexus-postgres-cdc",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "database.hostname": "postgres",
     "database.port": "5432",
     "database.user": "admin",
     "database.password": "admin",
-    "database.dbname": "ebap_db",
-    "topic.prefix": "ebap.cdc",
-    "table.include.list": "public.users",
+    "database.dbname": "nexus_db",
+    "topic.prefix": "pg",
+    "table.include.list": "public.users,public.products,public.orders,public.order_items,public.cart_items,public.user_events,public.sessions",
     "plugin.name": "pgoutput",
-    "slot.name": "ebap_slot",
-    "publication.name": "ebap_publication",
-
-    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "key.converter.schemas.enable": false,
-    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-    "value.converter.schemas.enable": false,
-
-    "transforms": "route",
-    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
-    "transforms.route.regex": "ebap\\.cdc\\.public\\.users",
-    "transforms.route.replacement": "ebap.cdc.users"
-    
+    "slot.name": "nexus_cdc_slot",
+    "publication.name": "nexus_cdc_pub",
+    "publication.autocreate.mode": "filtered",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.add.fields": "op,table,source.ts_ms",
+    "transforms.unwrap.drop.tombstones": "true",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "connect",
+    "snapshot.mode": "initial",
+    "heartbeat.interval.ms": "10000"
   }
 }
