@@ -13,6 +13,8 @@ ALLOWED_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
 
 SSE_KEEPALIVE_SECONDS = 25
 
+GENERATOR_POLL_SECONDS = 2
+
 CHANNEL_TO_EVENT = {
     "nexus.kpi": "metrics",
     "nexus.traffic": "traffic",

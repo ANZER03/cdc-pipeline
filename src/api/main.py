@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import ALLOWED_ORIGINS, API_START_TIME
-from api.dependencies import redis_service
+from api.dependencies import generator_manager, redis_service
+from api.routes.generator import router as generator_router
 from api.routes.events import router as events_router
 from api.routes.snapshots import router as snapshots_router
 
@@ -21,10 +22,12 @@ app.add_middleware(
 
 app.include_router(snapshots_router)
 app.include_router(events_router)
+app.include_router(generator_router)
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    await generator_manager.shutdown()
     await redis_service.close()
 
 

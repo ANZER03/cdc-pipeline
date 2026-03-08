@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -268,7 +268,7 @@ def sql_literal(value: Any) -> str:
         payload = json.dumps(value).replace("'", "''")
         return f"'{payload}'::jsonb"
     if isinstance(value, datetime):
-        return f"'{value.astimezone(UTC).isoformat()}'::timestamptz"
+        return f"'{value.astimezone(timezone.utc).isoformat()}'::timestamptz"
     text = str(value).replace("'", "''")
     return f"'{text}'"
 
@@ -381,7 +381,7 @@ def generate_postgres_cycle(
 ) -> None:
     user = choose_user(users, state)
     product = choose_product(products)
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     session_id = state.active_sessions.get(user.id)
 
     if session_id is None or random.random() < 0.25:
@@ -552,7 +552,7 @@ def make_request_log_payload(state: GeneratorState, users: list[UserRecord]) -> 
     else:
         status_code = random.choice([500, 502, 503])
     latency = max(5, int(random.gauss(100, 50)))
-    created_at = int(datetime.now(UTC).timestamp() * 1000)
+    created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     return {
         "id": state.next_request_log_id,
         "endpoint": endpoint,
@@ -567,7 +567,7 @@ def make_request_log_payload(state: GeneratorState, users: list[UserRecord]) -> 
 
 
 def make_system_metric_payload(state: GeneratorState) -> list[dict[str, Any]]:
-    recorded_at = int(datetime.now(UTC).timestamp() * 1000)
+    recorded_at = int(datetime.now(timezone.utc).timestamp() * 1000)
     payloads: list[dict[str, Any]] = []
     for node in random.sample(NODES, k=random.randint(3, min(5, len(NODES)))):
         for metric_name, mean, stddev in (("cpu_percent", 40, 15), ("memory_percent", 55, 10)):
