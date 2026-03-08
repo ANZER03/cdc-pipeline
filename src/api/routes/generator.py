@@ -17,9 +17,12 @@ router = APIRouter(tags=["generator"])
 
 
 class GeneratorStartRequest(BaseModel):
+    preset: Literal["custom", "light", "demo", "stress"] = "custom"
     mode: Literal["all", "postgres", "kafka"] = "all"
     rate: int = Field(default=10, ge=1, le=500)
     duration: int = Field(default=300, ge=5, le=3600)
+    size: Literal["small", "medium", "large"] = "medium"
+    error_rate: float = Field(default=0.05, ge=0.0, le=0.4)
 
 
 @router.get("/generator", response_class=HTMLResponse)
@@ -40,7 +43,14 @@ async def generator_start(
     manager: GeneratorManager = Depends(get_generator_manager),
 ) -> dict:
     try:
-        return await manager.start(mode=payload.mode, rate=payload.rate, duration=payload.duration)
+        return await manager.start(
+            preset=payload.preset,
+            mode=payload.mode,
+            rate=payload.rate,
+            duration=payload.duration,
+            size=payload.size,
+            error_rate=payload.error_rate,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -184,6 +194,42 @@ def _generator_html() -> str:
               grid-template-columns: repeat(2, minmax(0, 1fr));
               margin-top: 16px;
             }
+            .preset-row {
+              display: grid;
+              gap: 10px;
+              grid-template-columns: repeat(4, minmax(0, 1fr));
+              margin-bottom: 16px;
+            }
+            .preset-btn {
+              background: rgba(255,255,255,0.7);
+              border: 1px solid var(--line);
+              color: var(--text);
+            }
+            .preset-btn.active {
+              background: var(--brand-strong);
+              color: white;
+            }
+            .progress-wrap {
+              margin-top: 16px;
+            }
+            .progress-bar {
+              width: 100%;
+              height: 14px;
+              border-radius: 999px;
+              background: #e7ddd0;
+              overflow: hidden;
+            }
+            .progress-fill {
+              height: 100%;
+              width: 0%;
+              background: linear-gradient(90deg, var(--brand), #22c55e);
+              transition: width 0.35s ease;
+            }
+            .mini-grid {
+              display: grid;
+              gap: 10px;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
             .stat {
               padding: 14px;
               border-radius: 16px;
@@ -222,7 +268,14 @@ def _generator_html() -> str:
             <div class="grid">
               <section class="panel">
                 <h2>Run Settings</h2>
+                <div class="preset-row">
+                  <button class="preset-btn active" type="button" data-preset="custom">Custom</button>
+                  <button class="preset-btn" type="button" data-preset="light">Light</button>
+                  <button class="preset-btn" type="button" data-preset="demo">Demo</button>
+                  <button class="preset-btn" type="button" data-preset="stress">Stress</button>
+                </div>
                 <form id="generator-form">
+                  <input id="preset" name="preset" type="hidden" value="custom">
                   <div class="field">
                     <label for="mode">Generation Mode</label>
                     <select id="mode" name="mode">
@@ -238,6 +291,24 @@ def _generator_html() -> str:
                   <div class="field">
                     <label for="duration">Duration In Seconds</label>
                     <input id="duration" name="duration" type="number" min="5" max="3600" value="300">
+                  </div>
+                  <div class="mini-grid">
+                    <div class="field">
+                      <label for="size">Size</label>
+                      <select id="size" name="size">
+                        <option value="small">Small</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="large">Large</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="error-rate">Error Rate</label>
+                      <input id="error-rate" name="error-rate" type="number" min="0" max="0.4" step="0.01" value="0.05">
+                    </div>
+                    <div class="field">
+                      <label for="effective-rate">Effective Rate</label>
+                      <input id="effective-rate" name="effective-rate" type="text" value="20/s" disabled>
+                    </div>
                   </div>
                   <div class="actions">
                     <button class="primary" type="submit">Start Generation</button>
@@ -256,6 +327,10 @@ def _generator_html() -> str:
                   <div class="stat"><small>Finished</small><strong id="finished-at">-</strong></div>
                   <div class="stat"><small>Exit Code</small><strong id="exit-code">-</strong></div>
                   <div class="stat"><small>Last Payload</small><strong id="payload-mode">-</strong></div>
+                </div>
+                <div class="progress-wrap">
+                  <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+                  <div class="hint" id="progress-label">Progress: 0%</div>
                 </div>
                 <div class="hint" id="payload-summary">No run summary yet.</div>
               </section>
@@ -278,6 +353,39 @@ def _generator_html() -> str:
             const exitCode = document.getElementById('exit-code');
             const payloadMode = document.getElementById('payload-mode');
             const payloadSummary = document.getElementById('payload-summary');
+            const progressFill = document.getElementById('progress-fill');
+            const progressLabel = document.getElementById('progress-label');
+            const presetInput = document.getElementById('preset');
+            const presetButtons = Array.from(document.querySelectorAll('[data-preset]'));
+
+            const presets = {
+              custom: {rate: 10, duration: 300, size: 'medium', errorRate: 0.05},
+              light: {rate: 5, duration: 120, size: 'small', errorRate: 0.02},
+              demo: {rate: 20, duration: 300, size: 'medium', errorRate: 0.05},
+              stress: {rate: 60, duration: 600, size: 'large', errorRate: 0.12},
+            };
+
+            function currentMultiplier() {
+              return {small: 1, medium: 2, large: 4}[document.getElementById('size').value] || 1;
+            }
+
+            function updateEffectiveRate() {
+              const rate = Number(document.getElementById('rate').value || 0);
+              document.getElementById('effective-rate').value = `${rate * currentMultiplier()}/s`;
+            }
+
+            function activatePreset(name) {
+              presetInput.value = name;
+              presetButtons.forEach((button) => button.classList.toggle('active', button.dataset.preset === name));
+              if (name !== 'custom') {
+                const preset = presets[name];
+                document.getElementById('rate').value = preset.rate;
+                document.getElementById('duration').value = preset.duration;
+                document.getElementById('size').value = preset.size;
+                document.getElementById('error-rate').value = preset.errorRate;
+              }
+              updateEffectiveRate();
+            }
 
             function renderStatus(data) {
               statusPill.textContent = data.state.toUpperCase();
@@ -285,9 +393,14 @@ def _generator_html() -> str:
               startedAt.textContent = data.startedAt || '-';
               finishedAt.textContent = data.finishedAt || '-';
               exitCode.textContent = data.lastExitCode ?? '-';
+              progressFill.style.width = `${data.progress || 0}%`;
+              progressLabel.textContent = `Progress: ${data.progress || 0}%${data.elapsedSeconds ? ` · ${Math.round(data.elapsedSeconds)}s elapsed` : ''}`;
               if (data.lastPayload) {
-                payloadMode.textContent = data.lastPayload.mode;
-                payloadSummary.textContent = `Rate ${data.lastPayload.rate}/s for ${data.lastPayload.duration}s, ${data.lastPayload.postgres_users} users, ${data.lastPayload.products} products.`;
+                payloadMode.textContent = `${data.lastPayload.mode} / ${data.lastPayload.preset}`;
+                payloadSummary.textContent = `Effective ${data.lastPayload.effectiveRate}/s, size ${data.lastPayload.size} (x${data.lastPayload.sizeMultiplier}), error rate ${Math.round(data.lastPayload.errorRate * 100)}%, ${data.lastPayload.postgres_users} users, ${data.lastPayload.products} products.`;
+              } else if (data.requestedSettings) {
+                payloadMode.textContent = `${data.requestedSettings.mode} / ${data.requestedSettings.preset}`;
+                payloadSummary.textContent = `Requested ${data.requestedSettings.rate}/s for ${data.requestedSettings.duration}s with ${data.requestedSettings.size} size and ${Math.round(data.requestedSettings.errorRate * 100)}% error rate.`;
               } else {
                 payloadMode.textContent = '-';
                 payloadSummary.textContent = 'No run summary yet.';
@@ -304,9 +417,12 @@ def _generator_html() -> str:
             async function startGenerator(event) {
               event.preventDefault();
               const payload = {
+                preset: presetInput.value,
                 mode: document.getElementById('mode').value,
                 rate: Number(document.getElementById('rate').value),
                 duration: Number(document.getElementById('duration').value),
+                size: document.getElementById('size').value,
+                error_rate: Number(document.getElementById('error-rate').value),
               };
               const response = await fetch(startUrl, {
                 method: 'POST',
@@ -329,7 +445,13 @@ def _generator_html() -> str:
             document.getElementById('generator-form').addEventListener('submit', startGenerator);
             document.getElementById('stop-button').addEventListener('click', stopGenerator);
             document.getElementById('refresh-button').addEventListener('click', refreshStatus);
+            document.getElementById('rate').addEventListener('input', () => { activatePreset('custom'); });
+            document.getElementById('duration').addEventListener('input', () => { activatePreset('custom'); });
+            document.getElementById('size').addEventListener('change', () => { activatePreset('custom'); });
+            document.getElementById('error-rate').addEventListener('input', () => { activatePreset('custom'); });
+            presetButtons.forEach((button) => button.addEventListener('click', () => activatePreset(button.dataset.preset)));
 
+            updateEffectiveRate();
             refreshStatus();
             setInterval(refreshStatus, 2000);
           </script>

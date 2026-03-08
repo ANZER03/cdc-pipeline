@@ -110,6 +110,18 @@ DEFAULT_PRODUCTS = [
     ProductRecord(id=12, price=59.0, merchant_region="North America (West)"),
 ]
 
+SIZE_MULTIPLIERS = {
+    "small": 1,
+    "medium": 2,
+    "large": 4,
+}
+
+PRESET_DEFAULTS = {
+    "light": {"rate": 5, "duration": 120, "size": "small", "error_rate": 0.02},
+    "demo": {"rate": 20, "duration": 300, "size": "medium", "error_rate": 0.05},
+    "stress": {"rate": 60, "duration": 600, "size": "large", "error_rate": 0.12},
+}
+
 
 @dataclass
 class GeneratorState:
@@ -121,9 +133,14 @@ class GeneratorState:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Nexus CDC and Kafka test traffic")
+    parser.add_argument("--preset", choices=["custom", "light", "demo", "stress"], default="custom")
     parser.add_argument("--mode", choices=["all", "postgres", "kafka"], default="all")
     parser.add_argument("--rate", type=int, default=10, help="Target request events per second")
     parser.add_argument("--duration", type=int, default=300, help="Run length in seconds")
+    parser.add_argument("--size", choices=["small", "medium", "large"], default="medium")
+    parser.add_argument(
+        "--error-rate", type=float, default=0.05, help="Approximate HTTP error ratio"
+    )
     parser.add_argument("--users", type=str, default="", help="Optional CSV file for users")
     parser.add_argument("--postgres-container", default="nexus-postgres")
     parser.add_argument(
@@ -139,6 +156,26 @@ def parse_args() -> argparse.Namespace:
         "--summary-only", action="store_true", help="Print generated plan without writes"
     )
     return parser.parse_args()
+
+
+def size_multiplier(size: str) -> int:
+    return SIZE_MULTIPLIERS.get(size, 1)
+
+
+def apply_preset_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    if args.preset == "custom":
+        return args
+
+    preset = PRESET_DEFAULTS[args.preset]
+    if args.rate == 10:
+        args.rate = preset["rate"]
+    if args.duration == 300:
+        args.duration = preset["duration"]
+    if args.size == "medium":
+        args.size = preset["size"]
+    if args.error_rate == 0.05:
+        args.error_rate = preset["error_rate"]
+    return args
 
 
 def run_sql(container: str, sql: str) -> str:
@@ -540,14 +577,19 @@ def generate_postgres_cycle(
         state.active_sessions.pop(user.id, None)
 
 
-def make_request_log_payload(state: GeneratorState, users: list[UserRecord]) -> dict[str, Any]:
+def make_request_log_payload(
+    state: GeneratorState, users: list[UserRecord], error_rate: float
+) -> dict[str, Any]:
     user = choose_user(users, state)
     method, endpoint = random.choice(REQUEST_ENDPOINTS)
     state.next_request_log_id += 1
     status_roll = random.random()
-    if status_roll < 0.90:
+    server_error_rate = max(0.0, min(error_rate, 0.4))
+    client_error_rate = max(0.0, min(error_rate / 2.0, 0.2))
+    success_rate = max(0.0, 1.0 - server_error_rate - client_error_rate)
+    if status_roll < success_rate:
         status_code = 200
-    elif status_roll < 0.95:
+    elif status_roll < success_rate + client_error_rate:
         status_code = random.choice([400, 401, 404, 429])
     else:
         status_code = random.choice([500, 502, 503])
@@ -590,13 +632,14 @@ def run_kafka_generation(
     state: GeneratorState,
     args: argparse.Namespace,
 ) -> None:
+    effective_rate = args.rate * size_multiplier(args.size)
     if args.summary_only:
         started_at = time.monotonic()
         next_metrics_at = started_at
         while time.monotonic() - started_at < args.duration:
             second_start = time.monotonic()
-            for _ in range(args.rate):
-                payload = make_request_log_payload(state, users)
+            for _ in range(effective_rate):
+                payload = make_request_log_payload(state, users, args.error_rate)
                 print(json.dumps({"topic": "raw.request_log", "payload": payload}))
             if time.monotonic() >= next_metrics_at:
                 for payload in make_system_metric_payload(state):
@@ -612,8 +655,8 @@ def run_kafka_generation(
     while time.monotonic() - started_at < args.duration:
         second_start = time.monotonic()
         request_records: list[dict[str, Any]] = []
-        for _ in range(args.rate):
-            payload = make_request_log_payload(state, users)
+        for _ in range(effective_rate):
+            payload = make_request_log_payload(state, users, args.error_rate)
             request_records.append(payload)
 
         produce_avro_records(
@@ -646,12 +689,15 @@ def run_postgres_generation(
 ) -> None:
     iterations = max(1, args.duration)
     for _ in range(iterations):
-        generate_postgres_cycle(args.postgres_container, users, products, state, args.summary_only)
+        for _ in range(size_multiplier(args.size)):
+            generate_postgres_cycle(
+                args.postgres_container, users, products, state, args.summary_only
+            )
         time.sleep(min(1.0, 60.0 / max(args.rate, 1)))
 
 
 def main() -> int:
-    args = parse_args()
+    args = apply_preset_defaults(parse_args())
 
     if args.summary_only and not args.users:
         print("--summary-only requires --users when the stack is not running", file=sys.stderr)
@@ -690,8 +736,13 @@ def main() -> int:
         json.dumps(
             {
                 "mode": args.mode,
+                "preset": args.preset,
                 "duration": args.duration,
                 "rate": args.rate,
+                "effectiveRate": args.rate * size_multiplier(args.size),
+                "size": args.size,
+                "sizeMultiplier": size_multiplier(args.size),
+                "errorRate": args.error_rate,
                 "postgres_users": len(users),
                 "products": len(products),
             }
