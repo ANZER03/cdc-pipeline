@@ -47,26 +47,51 @@ def write_region_batch(batch_df: DataFrame, batch_id: int) -> None:
         )
 
     payload.sort(key=lambda entry: entry["name"])
-    NexusRedisWriter().write_json(REDIS_KEY_REGIONS_CURRENT, payload, channel=CHANNEL_REGIONS)
+    writer = NexusRedisWriter()
+    writer.write_json(REDIS_KEY_REGIONS_CURRENT, payload, channel=CHANNEL_REGIONS)
+
+    ranked_payload = sorted(payload, key=lambda entry: float(entry["intensity"]), reverse=True)
+    if len(ranked_payload) >= 2:
+        hub_region = ranked_payload[0]
+        flows_payload = [
+            {
+                "id": f"flow_{index}",
+                "source": entry["coords"],
+                "target": hub_region["coords"],
+                "value": float(entry["intensity"]),
+            }
+            for index, entry in enumerate(ranked_payload[1:6], start=1)
+        ]
+        writer.write_json(REDIS_KEY_FLOWS_CURRENT, flows_payload, channel=CHANNEL_FLOWS)
 
 
 def write_flow_batch(batch_df: DataFrame, batch_id: int) -> None:
     del batch_id
-    rows = batch_df.orderBy(F.col("id").desc()).limit(5).collect()
+    rows = batch_df.collect()
     if not rows:
         return
 
+    latest_window_end = max(row["window"]["end"] for row in rows)
+    current_rows = [row for row in rows if row["window"]["end"] == latest_window_end]
+    if len(current_rows) < 2:
+        return
+
+    ranked_rows = sorted(
+        current_rows,
+        key=lambda row: float(row["intensity"] or 0.0),
+        reverse=True,
+    )
+    hub_region = str(ranked_rows[0]["region_name"])
     payload = []
-    for row in rows:
-        item = row.asDict(recursive=True)
-        source = str(item["source_region"])
-        target = str(item["target_region"])
+    for index, row in enumerate(ranked_rows[1:6], start=1):
+        source = str(row["region_name"])
+        target = hub_region
         payload.append(
             {
-                "id": str(item["id"]),
+                "id": f"flow_{index}",
                 "source": REGION_COORDS.get(source, [0, 0]),
                 "target": REGION_COORDS.get(target, [0, 0]),
-                "value": round(float(item["value"] or 0.0), 1),
+                "value": round(float(row["intensity"] or 0.0), 1),
             }
         )
 
@@ -106,33 +131,16 @@ def build_region_snapshot(orders_df: DataFrame, request_log_df: DataFrame) -> Da
     )
 
 
-def build_flow_snapshot(orders_df: DataFrame, products_df: DataFrame) -> DataFrame:
-    del products_df
-    return orders_df.filter(F.col("status") == "completed").select(
-        F.concat(F.lit("flow_"), F.col("id").cast("string")).alias("id"),
-        F.col("region_name").alias("source_region"),
-        F.col("region_name").alias("target_region"),
-        F.lit(100.0).alias("value"),
-    )
-
-
 def start_region_aggregator(
     orders_df: DataFrame, request_log_df: DataFrame, products_df: DataFrame
-) -> tuple[StreamingQuery, StreamingQuery]:
+) -> StreamingQuery:
+    del products_df
     regions = build_region_snapshot(orders_df, request_log_df)
-    flows = build_flow_snapshot(orders_df, products_df)
     region_query = (
         regions.writeStream.outputMode("complete")
         .foreachBatch(write_region_batch)
-        .option("checkpointLocation", f"{CHECKPOINT_BASE}/regions")
+        .option("checkpointLocation", f"{CHECKPOINT_BASE}/regions-v2")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()
     )
-    flow_query = (
-        flows.writeStream.outputMode("append")
-        .foreachBatch(write_flow_batch)
-        .option("checkpointLocation", f"{CHECKPOINT_BASE}/flows")
-        .trigger(processingTime=TRIGGER_TRANSACTIONS)
-        .start()
-    )
-    return region_query, flow_query
+    return region_query

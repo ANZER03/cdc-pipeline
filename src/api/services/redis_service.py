@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from redis.asyncio import Redis
@@ -22,6 +23,14 @@ def _loads_json(value: str | None, fallback: Any) -> Any:
 def _parse_number(value: str | None) -> int | float:
     if value in (None, ""):
         return 0
+    try:
+        parsed_datetime = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed_datetime = None
+    if parsed_datetime is not None:
+        if parsed_datetime.tzinfo is None:
+            parsed_datetime = parsed_datetime.replace(tzinfo=timezone.utc)
+        return int(parsed_datetime.astimezone(timezone.utc).timestamp() * 1000)
     if any(token in value for token in (".", "e", "E")):
         return float(value)
     return int(value)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.avro.functions import from_avro
+from pyspark.sql.types import StructType
 
 from streaming.config import (
     KAFKA_BROKERS,
@@ -32,6 +33,7 @@ from streaming.schemas import (
     SYSTEM_METRICS_AVRO_SCHEMA,
     USER_EVENTS_AVRO_SCHEMA,
     USERS_AVRO_SCHEMA,
+    KPI_SNAPSHOT_SCHEMA,
 )
 
 
@@ -50,11 +52,18 @@ def _from_avro_options() -> dict[str, str]:
     return {"mode": "PERMISSIVE"}
 
 
+def _strip_schema_registry_header(column: str = "value"):
+    # Confluent Avro payloads store a 5-byte wire header before the Avro bytes.
+    return F.expr(f"substring({column}, 6, length({column}) - 5)")
+
+
 def read_cdc_stream(
     spark: SparkSession, topic: str, avro_schema: str, timestamp_column: str
 ) -> DataFrame:
     raw = _read_kafka_stream(spark, topic, "earliest")
-    parsed = raw.select(from_avro(F.col("value"), avro_schema, _from_avro_options()).alias("data"))
+    parsed = raw.select(
+        from_avro(_strip_schema_registry_header(), avro_schema, _from_avro_options()).alias("data")
+    )
     result = parsed.select("data.*").filter(F.col("__op").isin("c", "u", "r"))
     return result.withWatermark(timestamp_column, "10 minutes")
 
@@ -63,7 +72,9 @@ def read_direct_stream(
     spark: SparkSession, topic: str, avro_schema: str, timestamp_column: str
 ) -> DataFrame:
     raw = _read_kafka_stream(spark, topic, "latest")
-    parsed = raw.select(from_avro(F.col("value"), avro_schema, _from_avro_options()).alias("data"))
+    parsed = raw.select(
+        from_avro(_strip_schema_registry_header(), avro_schema, _from_avro_options()).alias("data")
+    )
     return parsed.select("data.*").withWatermark(timestamp_column, "10 minutes")
 
 
@@ -102,7 +113,14 @@ def read_system_metrics(spark: SparkSession) -> DataFrame:
 
 
 def read_aggregated_kpis(spark: SparkSession) -> DataFrame:
-    return _read_kafka_stream(spark, TOPIC_AGGREGATED_KPIS, "latest")
+    return _read_json_stream(spark, TOPIC_AGGREGATED_KPIS, KPI_SNAPSHOT_SCHEMA)
+
+
+def _read_json_stream(spark: SparkSession, topic: str, schema: StructType) -> DataFrame:
+    raw = _read_kafka_stream(spark, topic, "latest")
+    return raw.select(
+        F.from_json(F.col("value").cast("string"), schema).alias("data")
+    ).select("data.*")
 
 
 def read_postgres_table_snapshot(spark: SparkSession, table_name: str) -> DataFrame:

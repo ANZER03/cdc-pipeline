@@ -9,12 +9,17 @@ from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
 
 from streaming.config import (
+    ALERT_RULES,
     CHECKPOINT_BASE,
+    CHANNEL_ALERTS,
     CHANNEL_KPI,
     KPI_SLIDE_INTERVAL,
     KPI_WINDOW_DURATION,
+    REDIS_KEY_ALERT_RULES,
+    REDIS_KEY_ALERT_SUMMARY,
     REDIS_KEY_KPI_CURRENT,
     REDIS_KEY_KPI_SNAPSHOT,
+    TOPIC_AGGREGATED_KPIS,
     TRIGGER_TRANSACTIONS,
 )
 from streaming.redis_client import NexusRedisWriter
@@ -35,7 +40,7 @@ def _compute_trend(current: float, previous: float | None) -> float:
 
 
 def _serialize_kpi_row(row: Row) -> dict[str, float | int]:
-    data = cast(dict[str, Any], row.asDict(recursive=True))
+    data = cast(dict, row.asDict(recursive=True))
     return {
         "activeUsers": int(data["activeUsers"] or 0),
         "revenue": round(float(data["revenue"] or 0.0), 2),
@@ -77,12 +82,54 @@ def write_kpi_batch(batch_df: DataFrame, batch_id: int) -> None:
 
     writer.write_hash(REDIS_KEY_KPI_CURRENT, payload, channel=CHANNEL_KPI)
     writer.write_hash(snapshot_key, current, ttl=7200)
+    _write_alerts(writer, payload)
 
 
 def _as_float(value: str | None) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _write_alerts(writer: NexusRedisWriter, payload: dict[str, float | int]) -> None:
+    rules = []
+    for rule in ALERT_RULES:
+        if rule["metric"] == "system.latency.p99":
+            current_value = float(payload["latency"])
+        elif rule["metric"] == "checkout.error_rate":
+            current_value = float(payload["errorRate"])
+        else:
+            current_value = 0.0
+
+        status = "firing" if current_value >= float(rule["threshold"]) else "ok"
+        rules.append(
+            {
+                "id": rule["id"],
+                "name": rule["name"],
+                "status": status,
+                "severity": rule["severity"],
+                "metric": rule["metric"],
+                "currentValue": round(current_value, 2),
+                "threshold": float(rule["threshold"]),
+                "updatedAt": int(payload["updatedAt"]),
+                "lastEvaluated": int(payload["updatedAt"]),
+                "frequency": rule["frequency"],
+            }
+        )
+
+    summary = {
+        "criticalCount": sum(
+            1 for rule in rules if rule["severity"] == "critical" and rule["status"] != "ok"
+        ),
+        "warningCount": sum(
+            1 for rule in rules if rule["severity"] == "warning" and rule["status"] != "ok"
+        ),
+        "healthyCount": sum(1 for rule in rules if rule["status"] == "ok"),
+        "criticalImpact": "Currently affecting 0% of users",
+        "updatedAt": int(payload["updatedAt"]),
+    }
+    writer.write_json(REDIS_KEY_ALERT_RULES, rules, channel=CHANNEL_ALERTS)
+    writer.write_hash(REDIS_KEY_ALERT_SUMMARY, summary)
 
 
 def build_kpi_frame(
@@ -147,12 +194,40 @@ def build_kpi_frame(
 
 def start_kpi_aggregator(
     orders_df: DataFrame, sessions_df: DataFrame, request_log_df: DataFrame
-) -> StreamingQuery:
+) -> tuple[StreamingQuery, StreamingQuery]:
     frame = build_kpi_frame(orders_df, sessions_df, request_log_df)
-    return (
+    redis_query = (
         frame.writeStream.outputMode("update")
         .foreachBatch(write_kpi_batch)
         .option("checkpointLocation", f"{CHECKPOINT_BASE}/kpi")
         .trigger(processingTime=TRIGGER_TRANSACTIONS)
         .start()
     )
+    kafka_payload = frame.select(
+        F.col("updatedAt").cast("string").alias("key"),
+        F.to_json(
+            F.struct(
+                "activeUsers",
+                F.lit(0.0).alias("activeUsersTrend"),
+                "revenue",
+                F.lit(0.0).alias("revenueTrend"),
+                "orders",
+                F.lit(0.0).alias("ordersTrend"),
+                F.round(F.col("errorRate"), 2).alias("errorRate"),
+                F.lit(0.0).alias("errorRateTrend"),
+                "latency",
+                F.lit(0.0).alias("latencyTrend"),
+                "updatedAt",
+            )
+        ).alias("value"),
+    )
+    kafka_query = (
+        kafka_payload.writeStream.format("kafka")
+        .outputMode("update")
+        .option("checkpointLocation", f"{CHECKPOINT_BASE}/kpi-kafka")
+        .option("kafka.bootstrap.servers", "kafka-1:9092,kafka-2:9093")
+        .option("topic", TOPIC_AGGREGATED_KPIS)
+        .trigger(processingTime=TRIGGER_TRANSACTIONS)
+        .start()
+    )
+    return redis_query, kafka_query

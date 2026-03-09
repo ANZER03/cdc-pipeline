@@ -342,22 +342,11 @@ def _generator_html() -> str:
             </section>
           </div>
 
+          <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
           <script>
             const statusUrl = '/api/generator/status';
             const startUrl = '/api/generator/start';
             const stopUrl = '/api/generator/stop';
-            const logNode = document.getElementById('logs');
-            const statusPill = document.getElementById('status-pill');
-            const startedAt = document.getElementById('started-at');
-            const finishedAt = document.getElementById('finished-at');
-            const exitCode = document.getElementById('exit-code');
-            const payloadMode = document.getElementById('payload-mode');
-            const payloadSummary = document.getElementById('payload-summary');
-            const progressFill = document.getElementById('progress-fill');
-            const progressLabel = document.getElementById('progress-label');
-            const presetInput = document.getElementById('preset');
-            const presetButtons = Array.from(document.querySelectorAll('[data-preset]'));
-
             const presets = {
               custom: {rate: 10, duration: 300, size: 'medium', errorRate: 0.05},
               light: {rate: 5, duration: 120, size: 'small', errorRate: 0.02},
@@ -366,94 +355,113 @@ def _generator_html() -> str:
             };
 
             function currentMultiplier() {
-              return {small: 1, medium: 2, large: 4}[document.getElementById('size').value] || 1;
+              return {small: 1, medium: 2, large: 4}[$('#size').val()] || 1;
             }
 
             function updateEffectiveRate() {
-              const rate = Number(document.getElementById('rate').value || 0);
-              document.getElementById('effective-rate').value = `${rate * currentMultiplier()}/s`;
+              const rate = Number($('#rate').val() || 0);
+              $('#effective-rate').val(`${rate * currentMultiplier()}/s`);
             }
 
             function activatePreset(name) {
-              presetInput.value = name;
-              presetButtons.forEach((button) => button.classList.toggle('active', button.dataset.preset === name));
+              $('#preset').val(name);
+              $('[data-preset]').each(function togglePreset() {
+                $(this).toggleClass('active', $(this).data('preset') === name);
+              });
               if (name !== 'custom') {
                 const preset = presets[name];
-                document.getElementById('rate').value = preset.rate;
-                document.getElementById('duration').value = preset.duration;
-                document.getElementById('size').value = preset.size;
-                document.getElementById('error-rate').value = preset.errorRate;
+                $('#rate').val(preset.rate);
+                $('#duration').val(preset.duration);
+                $('#size').val(preset.size);
+                $('#error-rate').val(preset.errorRate);
               }
               updateEffectiveRate();
             }
 
             function renderStatus(data) {
-              statusPill.textContent = data.state.toUpperCase();
-              statusPill.className = 'status-pill ' + data.state;
-              startedAt.textContent = data.startedAt || '-';
-              finishedAt.textContent = data.finishedAt || '-';
-              exitCode.textContent = data.lastExitCode ?? '-';
-              progressFill.style.width = `${data.progress || 0}%`;
-              progressLabel.textContent = `Progress: ${data.progress || 0}%${data.elapsedSeconds ? ` · ${Math.round(data.elapsedSeconds)}s elapsed` : ''}`;
+              $('#status-pill')
+                .text((data.state || 'idle').toUpperCase())
+                .attr('class', `status-pill ${data.state}`);
+              $('#started-at').text(data.startedAt || '-');
+              $('#finished-at').text(data.finishedAt || '-');
+              $('#exit-code').text(data.lastExitCode ?? '-');
+              $('#progress-fill').css('width', `${data.progress || 0}%`);
+              $('#progress-label').text(`Progress: ${data.progress || 0}%${data.elapsedSeconds ? ` · ${Math.round(data.elapsedSeconds)}s elapsed` : ''}`);
+
               if (data.lastPayload) {
-                payloadMode.textContent = `${data.lastPayload.mode} / ${data.lastPayload.preset}`;
-                payloadSummary.textContent = `Effective ${data.lastPayload.effectiveRate}/s, size ${data.lastPayload.size} (x${data.lastPayload.sizeMultiplier}), error rate ${Math.round(data.lastPayload.errorRate * 100)}%, ${data.lastPayload.postgres_users} users, ${data.lastPayload.products} products.`;
+                $('#payload-mode').text(`${data.lastPayload.mode} / ${data.lastPayload.preset}`);
+                $('#payload-summary').text(`Effective ${data.lastPayload.effectiveRate}/s, size ${data.lastPayload.size} (x${data.lastPayload.sizeMultiplier}), error rate ${Math.round(data.lastPayload.errorRate * 100)}%, ${data.lastPayload.postgres_users} users, ${data.lastPayload.products} products.`);
               } else if (data.requestedSettings) {
-                payloadMode.textContent = `${data.requestedSettings.mode} / ${data.requestedSettings.preset}`;
-                payloadSummary.textContent = `Requested ${data.requestedSettings.rate}/s for ${data.requestedSettings.duration}s with ${data.requestedSettings.size} size and ${Math.round(data.requestedSettings.errorRate * 100)}% error rate.`;
+                $('#payload-mode').text(`${data.requestedSettings.mode} / ${data.requestedSettings.preset}`);
+                $('#payload-summary').text(`Requested ${data.requestedSettings.rate}/s for ${data.requestedSettings.duration}s with ${data.requestedSettings.size} size and ${Math.round(data.requestedSettings.errorRate * 100)}% error rate.`);
               } else {
-                payloadMode.textContent = '-';
-                payloadSummary.textContent = 'No run summary yet.';
+                $('#payload-mode').text('-');
+                $('#payload-summary').text('No run summary yet.');
               }
-              logNode.textContent = data.logLines.length ? data.logLines.join('\n') : 'Waiting for generator activity...';
-              logNode.scrollTop = logNode.scrollHeight;
+
+              const logs = data.logLines && data.logLines.length ? data.logLines.join('\\n') : 'Waiting for generator activity...';
+              const $logs = $('#logs');
+              $logs.text(logs);
+              $logs.scrollTop($logs.prop('scrollHeight'));
             }
 
-            async function refreshStatus() {
-              const response = await fetch(statusUrl);
-              renderStatus(await response.json());
+            function showProblem(xhr, fallbackMessage) {
+              const detail = xhr.responseJSON && xhr.responseJSON.detail;
+              alert(detail || fallbackMessage);
             }
 
-            async function startGenerator(event) {
+            function refreshStatus() {
+              return $.getJSON(statusUrl).done(renderStatus);
+            }
+
+            function startGenerator(event) {
               event.preventDefault();
               const payload = {
-                preset: presetInput.value,
-                mode: document.getElementById('mode').value,
-                rate: Number(document.getElementById('rate').value),
-                duration: Number(document.getElementById('duration').value),
-                size: document.getElementById('size').value,
-                error_rate: Number(document.getElementById('error-rate').value),
+                preset: $('#preset').val(),
+                mode: $('#mode').val(),
+                rate: Number($('#rate').val()),
+                duration: Number($('#duration').val()),
+                size: $('#size').val(),
+                error_rate: Number($('#error-rate').val()),
               };
-              const response = await fetch(startUrl, {
+
+              $.ajax({
+                url: startUrl,
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload),
+                contentType: 'application/json',
+                data: JSON.stringify(payload),
+              })
+                .done(renderStatus)
+                .fail((xhr) => showProblem(xhr, 'Unable to start generator'));
+            }
+
+            function stopGenerator() {
+              $.ajax({
+                url: stopUrl,
+                method: 'POST',
+              })
+                .done(renderStatus)
+                .fail((xhr) => showProblem(xhr, 'Unable to stop generator'));
+            }
+
+            $(function initGeneratorUi() {
+              $('#generator-form').on('submit', startGenerator);
+              $('#stop-button').on('click', stopGenerator);
+              $('#refresh-button').on('click', refreshStatus);
+              $('#rate, #duration, #error-rate').on('input', function onManualInput() {
+                activatePreset('custom');
               });
-              if (!response.ok) {
-                const problem = await response.json();
-                alert(problem.detail || 'Unable to start generator');
-                return;
-              }
-              renderStatus(await response.json());
-            }
+              $('#size').on('change', function onSizeChange() {
+                activatePreset('custom');
+              });
+              $('[data-preset]').on('click', function onPresetClick() {
+                activatePreset($(this).data('preset'));
+              });
 
-            async function stopGenerator() {
-              const response = await fetch(stopUrl, {method: 'POST'});
-              renderStatus(await response.json());
-            }
-
-            document.getElementById('generator-form').addEventListener('submit', startGenerator);
-            document.getElementById('stop-button').addEventListener('click', stopGenerator);
-            document.getElementById('refresh-button').addEventListener('click', refreshStatus);
-            document.getElementById('rate').addEventListener('input', () => { activatePreset('custom'); });
-            document.getElementById('duration').addEventListener('input', () => { activatePreset('custom'); });
-            document.getElementById('size').addEventListener('change', () => { activatePreset('custom'); });
-            document.getElementById('error-rate').addEventListener('input', () => { activatePreset('custom'); });
-            presetButtons.forEach((button) => button.addEventListener('click', () => activatePreset(button.dataset.preset)));
-
-            updateEffectiveRate();
-            refreshStatus();
-            setInterval(refreshStatus, 2000);
+              updateEffectiveRate();
+              refreshStatus();
+              setInterval(refreshStatus, 2000);
+            });
           </script>
         </body>
         </html>

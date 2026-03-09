@@ -25,11 +25,15 @@ def write_alert_batch(batch_df: DataFrame, batch_id: int) -> None:
 
     payload = [row.asDict(recursive=True) for row in rows]
     summary = {
-        "criticalCount": sum(1 for row in payload if row["severity"] == "critical"),
-        "warningCount": sum(1 for row in payload if row["severity"] == "warning"),
+        "criticalCount": sum(
+            1 for row in payload if row["severity"] == "critical" and row["status"] != "ok"
+        ),
+        "warningCount": sum(
+            1 for row in payload if row["severity"] == "warning" and row["status"] != "ok"
+        ),
         "healthyCount": sum(1 for row in payload if row["status"] == "ok"),
         "criticalImpact": "Currently affecting 0% of users",
-        "updatedAt": payload[0]["lastEvaluated"],
+        "updatedAt": max(int(row["updatedAt"]) for row in payload),
     }
     writer = NexusRedisWriter()
     writer.write_json(REDIS_KEY_ALERT_RULES, payload, channel=CHANNEL_ALERTS)
@@ -37,36 +41,49 @@ def write_alert_batch(batch_df: DataFrame, batch_id: int) -> None:
 
 
 def build_alert_frame(kpis_stream: DataFrame) -> DataFrame:
-    if "value" in kpis_stream.columns:
-        base = kpis_stream.selectExpr("CAST(value AS STRING) AS raw_value")
-    else:
-        base = kpis_stream.select(F.to_json(F.struct("*")).alias("raw_value"))
-
-    return (
-        base.groupBy()
-        .agg(F.count("*").alias("sample_count"))
-        .select(
-            F.lit(ALERT_RULES[0]["id"]).alias("id"),
-            F.lit(ALERT_RULES[0]["name"]).alias("name"),
-            F.when(F.col("sample_count") > 0, F.lit("ok"))
-            .otherwise(F.lit("pending"))
-            .alias("status"),
-            F.lit(ALERT_RULES[0]["severity"]).alias("severity"),
-            F.lit(ALERT_RULES[0]["metric"]).alias("metric"),
-            F.col("sample_count").cast("double").alias("currentValue"),
-            F.lit(ALERT_RULES[0]["threshold"]).alias("threshold"),
-            F.current_timestamp().alias("lastEvaluated"),
-            F.lit(ALERT_RULES[0]["frequency"]).alias("frequency"),
+    rule_rows = []
+    for rule in ALERT_RULES:
+        metric_column = {
+            "system.latency.p99": "latency",
+            "checkout.error_rate": "errorRate",
+            "db.cpu.percent": None,
+        }[rule["metric"]]
+        if metric_column is None:
+            current_value = F.lit(0.0).alias("currentValue")
+            status = F.lit("pending").alias("status")
+        else:
+            current_value = F.col(metric_column).cast("double").alias("currentValue")
+            status = (
+                F.when(F.col(metric_column) >= F.lit(float(rule["threshold"])), F.lit("firing"))
+                .otherwise(F.lit("ok"))
+                .alias("status")
+            )
+        rule_rows.append(
+            kpis_stream.select(
+                F.lit(rule["id"]).alias("id"),
+                F.lit(rule["name"]).alias("name"),
+                status,
+                F.lit(rule["severity"]).alias("severity"),
+                F.lit(rule["metric"]).alias("metric"),
+                current_value,
+                F.lit(float(rule["threshold"])).alias("threshold"),
+                F.col("updatedAt").cast("long").alias("updatedAt"),
+                F.from_unixtime(F.col("updatedAt") / 1000.0).alias("lastEvaluated"),
+                F.lit(rule["frequency"]).alias("frequency"),
+            )
         )
-    )
+    frame = rule_rows[0]
+    for extra in rule_rows[1:]:
+        frame = frame.unionByName(extra)
+    return frame
 
 
 def start_alert_evaluator(kpis_stream: DataFrame) -> StreamingQuery:
     frame = build_alert_frame(kpis_stream)
     return (
-        frame.writeStream.outputMode("complete")
+        frame.writeStream.outputMode("update")
         .foreachBatch(write_alert_batch)
-        .option("checkpointLocation", f"{CHECKPOINT_BASE}/alerts")
+        .option("checkpointLocation", f"{CHECKPOINT_BASE}/alerts-v2")
         .trigger(processingTime=TRIGGER_DERIVED)
         .start()
     )

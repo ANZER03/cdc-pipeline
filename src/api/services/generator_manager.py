@@ -27,6 +27,10 @@ class GeneratorManager:
         self._target_duration: int | None = None
         self._requested_settings: dict[str, Any] | None = None
 
+    @staticmethod
+    def _script_path() -> Path:
+        return Path(__file__).resolve().parents[3] / "scripts" / "generate_test_data.py"
+
     async def start(
         self,
         *,
@@ -41,7 +45,11 @@ class GeneratorManager:
             if self.is_running:
                 raise RuntimeError("Generator is already running")
 
-            script_path = Path("/app/scripts/generate_test_data.py")
+            script_path = self._script_path()
+            if not script_path.exists():
+                message = f"Generator script not found: {script_path}"
+                self._append_log(message)
+                raise RuntimeError(message)
             env = os.environ.copy()
             command = [
                 sys.executable,

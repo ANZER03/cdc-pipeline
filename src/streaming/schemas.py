@@ -143,6 +143,22 @@ SYSTEM_METRICS_SCHEMA = StructType(
     ]
 )
 
+KPI_SNAPSHOT_SCHEMA = StructType(
+    [
+        StructField("activeUsers", LongType(), False),
+        StructField("activeUsersTrend", DoubleType(), False),
+        StructField("revenue", DoubleType(), False),
+        StructField("revenueTrend", DoubleType(), False),
+        StructField("orders", LongType(), False),
+        StructField("ordersTrend", DoubleType(), False),
+        StructField("errorRate", DoubleType(), False),
+        StructField("errorRateTrend", DoubleType(), False),
+        StructField("latency", LongType(), False),
+        StructField("latencyTrend", DoubleType(), False),
+        StructField("updatedAt", LongType(), False),
+    ]
+)
+
 
 USERS_AVRO_SCHEMA = """{"type":"record","name":"UsersCdc","fields":[{"name":"id","type":"long"},{"name":"username","type":"string"},{"name":"display_name","type":"string"},{"name":"email","type":"string"},{"name":"country_code","type":["null","string"],"default":null},{"name":"city","type":["null","string"],"default":null},{"name":"region_name","type":["null","string"],"default":null},{"name":"platform","type":["null","string"],"default":null},{"name":"created_at","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null},{"name":"updated_at","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null},{"name":"__op","type":["null","string"],"default":null},{"name":"__table","type":["null","string"],"default":null},{"name":"__source_ts_ms","type":["null","long"],"default":null},{"name":"__deleted","type":["null","string"],"default":null}]}"""
 PRODUCTS_AVRO_SCHEMA = """{"type":"record","name":"ProductsCdc","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"},{"name":"category","type":["null","string"],"default":null},{"name":"price","type":"double"},{"name":"merchant_region","type":["null","string"],"default":null},{"name":"created_at","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null},{"name":"updated_at","type":["null",{"type":"long","logicalType":"timestamp-millis"}],"default":null},{"name":"__op","type":["null","string"],"default":null},{"name":"__table","type":["null","string"],"default":null},{"name":"__source_ts_ms","type":["null","long"],"default":null},{"name":"__deleted","type":["null","string"],"default":null}]}"""

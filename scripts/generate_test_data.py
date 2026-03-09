@@ -12,6 +12,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -727,9 +728,24 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
-    if args.mode in {"all", "postgres"}:
+    if args.mode == "all":
+        postgres_thread = threading.Thread(
+            target=run_postgres_generation,
+            args=(users, products, state, args),
+            daemon=False,
+        )
+        kafka_thread = threading.Thread(
+            target=run_kafka_generation,
+            args=(users, state, args),
+            daemon=False,
+        )
+        postgres_thread.start()
+        kafka_thread.start()
+        postgres_thread.join()
+        kafka_thread.join()
+    elif args.mode == "postgres":
         run_postgres_generation(users, products, state, args)
-    if args.mode in {"all", "kafka"}:
+    elif args.mode == "kafka":
         run_kafka_generation(users, state, args)
 
     print(
