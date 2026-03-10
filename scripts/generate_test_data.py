@@ -22,6 +22,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SQL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("SQL_COMMAND_TIMEOUT_SECONDS", "120"))
+KAFKA_PRODUCE_TIMEOUT_SECONDS = int(os.getenv("KAFKA_PRODUCE_TIMEOUT_SECONDS", "120"))
 
 REQUEST_LOG_SCHEMA = {
     "type": "record",
@@ -36,6 +38,8 @@ REQUEST_LOG_SCHEMA = {
         {"name": "user_id", "type": ["null", "long"], "default": None},
         {"name": "session_id", "type": ["null", "string"], "default": None},
         {"name": "region_name", "type": ["null", "string"], "default": None},
+        {"name": "user_display_name", "type": ["null", "string"], "default": None},
+        {"name": "platform", "type": ["null", "string"], "default": None},
         {"name": "created_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
     ],
 }
@@ -196,7 +200,13 @@ def run_sql(container: str, sql: str) -> str:
         "-c",
         sql,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=SQL_COMMAND_TIMEOUT_SECONDS,
+    )
     return result.stdout.strip()
 
 
@@ -352,7 +362,14 @@ def produce_avro_records(
         )
         + "\n"
     )
-    subprocess.run(command, input=payload, text=True, capture_output=True, check=True)
+    subprocess.run(
+        command,
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=KAFKA_PRODUCE_TIMEOUT_SECONDS,
+    )
 
 
 def _encode_avro_json(value: Any, schema: Any) -> Any:
@@ -459,7 +476,7 @@ def generate_postgres_cycle(
         order_id = parse_returning_id(
             run_sql(
                 container,
-                "INSERT INTO orders (user_id, total_amount, currency, status, region_name, created_at, updated_at) VALUES ("
+                "INSERT INTO orders (user_id, total_amount, currency, status, region_name, user_display_name, platform, created_at, updated_at) VALUES ("
                 + ", ".join(
                     [
                         sql_literal(user.id),
@@ -467,6 +484,8 @@ def generate_postgres_cycle(
                         sql_literal("USD"),
                         sql_literal("pending"),
                         sql_literal(user.region_name),
+                        sql_literal(user.display_name),
+                        sql_literal(user.platform),
                         sql_literal(now + timedelta(seconds=5)),
                         sql_literal(now + timedelta(seconds=5)),
                     ]
@@ -526,7 +545,7 @@ def generate_postgres_cycle(
             metadata = {"product_id": product.id}
 
         statements.append(
-            "INSERT INTO user_events (user_id, event_type, page_url, referrer_url, user_agent, ip_address, session_id, metadata, created_at) VALUES ("
+            "INSERT INTO user_events (user_id, event_type, page_url, referrer_url, user_agent, ip_address, session_id, metadata, user_display_name, region_name, city, country_code, platform, amount, created_at) VALUES ("
             + ", ".join(
                 [
                     sql_literal(user.id),
@@ -539,6 +558,12 @@ def generate_postgres_cycle(
                     sql_literal(random_ip()),
                     sql_literal(session_id),
                     sql_literal(metadata),
+                    sql_literal(user.display_name),
+                    sql_literal(user.region_name),
+                    sql_literal(user.city),
+                    sql_literal(user.country_code),
+                    sql_literal(user.platform),
+                    sql_literal(order_total if event_type == "checkout_complete" else None),
                     sql_literal(event_time),
                 ]
             )
@@ -605,6 +630,8 @@ def make_request_log_payload(
         "user_id": user.id,
         "session_id": state.active_sessions.get(user.id),
         "region_name": user.region_name,
+        "user_display_name": user.display_name,
+        "platform": user.platform,
         "created_at": created_at,
     }
 
@@ -688,12 +715,14 @@ def run_postgres_generation(
     state: GeneratorState,
     args: argparse.Namespace,
 ) -> None:
-    iterations = max(1, args.duration)
-    for _ in range(iterations):
+    started_at = time.monotonic()
+    while time.monotonic() - started_at < args.duration:
         for _ in range(size_multiplier(args.size)):
             generate_postgres_cycle(
                 args.postgres_container, users, products, state, args.summary_only
             )
+            if time.monotonic() - started_at >= args.duration:
+                break
         time.sleep(min(1.0, 60.0 / max(args.rate, 1)))
 
 

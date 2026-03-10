@@ -15,22 +15,6 @@ from streaming.config import (
 from streaming.redis_client import NexusRedisWriter
 
 
-def seed_platform_breakdown(users_df: DataFrame) -> None:
-    rows = (
-        users_df.filter(F.col("platform").isNotNull())
-        .groupBy("platform")
-        .count()
-        .select(F.col("platform").alias("name"), F.col("count").alias("value"))
-        .collect()
-    )
-    if not rows:
-        return
-
-    payload = [row.asDict(recursive=True) for row in rows]
-    payload.sort(key=lambda item: item["name"])
-    NexusRedisWriter().write_json(REDIS_KEY_PLATFORM_BREAKDOWN, payload, channel=CHANNEL_PLATFORM)
-
-
 def write_platform_batch(batch_df: DataFrame, batch_id: int) -> None:
     del batch_id
     rows = batch_df.collect()

@@ -39,20 +39,24 @@ flowchart LR
 
 [`scripts/generate_test_data.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/scripts/generate_test_data.py) drives both ingestion paths:
 
-- PostgreSQL writes:
-  - `orders`
-  - `sessions`
-  - `user_events`
+- PostgreSQL writes (fat-event rows — all display/dimension fields embedded at write time):
+  - `orders` — includes `user_display_name`, `region_name`, `platform`, `city`, `country_code`, `amount`
+  - `sessions` — includes `platform`, `user_display_name`
+  - `user_events` — includes `user_display_name`, `platform`, `city`, `country_code`, `amount`
   - other relational source tables already present in the schema
-- direct Kafka writes:
+- direct Kafka writes (Avro with inline schema):
   - `raw.request_log`
   - `raw.system_metrics`
 
-`mode=all` now runs the Postgres and Kafka generation paths concurrently.
+`mode=all` runs the Postgres and Kafka generation paths concurrently.
+
+### Fat-Event Denormalization
+
+All dimension data (`user_display_name`, `region_name`, `platform`, `city`, `country_code`, `amount`) is embedded directly into source rows at write time by the generator. There are **no per-batch JDBC reads** in any Spark hot path. This eliminates cross-stream joins on CDC data and removes latency spikes that would otherwise occur when a batch performs JDBC lookups while concurrently processing streaming windows.
 
 ### PostgreSQL and Debezium
 
-Transactional and behavioral tables live in PostgreSQL. Debezium captures row changes and publishes them to Kafka CDC topics.
+Transactional and behavioral tables live in PostgreSQL. Debezium captures row changes and publishes them to Kafka CDC topics in Confluent Avro format (5-byte Schema Registry wire header + Avro payload). Each CDC topic value is registered under `<topic>-value` in the Schema Registry.
 
 ```mermaid
 flowchart LR
@@ -76,21 +80,56 @@ Primary CDC topics used by the streaming jobs:
 
 There are two input classes:
 
-- Direct raw topics
+- Direct raw topics (Avro with inline schema, `startingOffsets=latest`):
   - `raw.request_log`
   - `raw.system_metrics`
-- Debezium CDC topics
+- Debezium CDC topics (Confluent Avro, writer schema fetched from registry, `startingOffsets=latest`):
   - `pg.public.*`
 
 There is also one derived Kafka topic currently used as a contract output:
 
 - `aggregated.kpis`
 
-### Important decoding detail
+### Avro Decoding
 
-[`src/streaming/kafka_sources.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/kafka_sources.py) strips the 5-byte Confluent Schema Registry wire header before Avro decoding CDC and raw direct messages.
+[`src/streaming/kafka_sources.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/kafka_sources.py) handles two concerns:
 
-Without that step, Spark receives invalid Avro payloads and downstream streams become unreliable.
+1. **Schema Registry wire header**: Confluent Avro payloads carry a 5-byte header (magic byte + 4-byte schema ID). This is stripped via `substring(value, 6, length(value) - 5)` before passing the payload to `from_avro`.
+
+2. **Writer schema fetch**: At startup, `_fetch_schema_from_registry` fetches the latest schema from Schema Registry using `urllib.request` (the `requests` library is not available in the Spark Docker image). The writer schema is used directly, avoiding name/namespace mismatches that cause `from_avro` in PERMISSIVE mode to silently return NULL for every record.
+
+### Watermark Placement
+
+`read_cdc_stream` and `read_direct_stream` do **not** call `.withWatermark()`. Watermarks are applied inside each aggregator transform after unioning multiple streams, because Spark 3.3+ raises `AnalysisException: Redefining watermark is disallowed` if `.withWatermark()` is called on the same logical plan node more than once.
+
+### Checkpoints
+
+Checkpoints are stored in `/tmp/nexus-checkpoints` (ephemeral). They are lost when containers restart, so all streams resume from `startingOffsets=latest` on each startup. This is intentional — starting from `earliest` on restart caused the first batch to drain 1000–1500 messages on a single executor core, reliably triggering `ProcessingTimeExecutor: Current batch is falling behind`.
+
+## Spark Cluster
+
+Two Spark workers are registered with the standalone master at `spark://spark-master:7077`:
+
+| Container | Cores | Memory | Web UI (host) |
+|---|---|---|---|
+| `nexus-spark-worker` | 4 | 2 GB | http://localhost:8091 |
+| `nexus-spark-worker-2` | 4 | 2 GB | http://localhost:8092 |
+
+Each of the three Spark job containers submits to the cluster with `--total-executor-cores 2` and a 30-second trigger interval. Trigger intervals are defined in [`src/streaming/config.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/config.py):
+
+```
+TRIGGER_TRANSACTIONS    = "30 seconds"
+TRIGGER_INFRASTRUCTURE  = "30 seconds"
+TRIGGER_DERIVED         = "30 seconds"
+```
+
+Each job's Spark Driver UI is accessible at:
+
+| Job | Driver UI |
+|---|---|
+| `nexus-transactions` | http://localhost:4040 |
+| `nexus-infrastructure` | http://localhost:4041 |
+| `nexus-derived` | http://localhost:4042 |
 
 ## Spark Jobs
 
@@ -102,7 +141,6 @@ flowchart TD
       ORD[pg.public.orders]
       SES[pg.public.sessions]
       UEV[pg.public.user_events]
-      USR[users snapshot via JDBC]
       RQ[raw.request_log]
       SYS[raw.system_metrics]
     end
@@ -119,16 +157,13 @@ flowchart TD
     end
 
     ORD --> TX
-    SES --> TX
     UEV --> TX
-    USR --> TX
     RQ --> TX
 
     RQ --> INF
     SYS --> INF
 
     SES --> DER
-    USR --> DER
 
     TX --> AKPI
     TX --> REDIS
@@ -148,13 +183,13 @@ Purpose:
 - regional snapshot
 - flow snapshot
 
+Each aggregator receives its own independent stream instance (separate `read_orders(spark)` / `read_request_log(spark)` calls per consumer) to avoid Spark seeing multiple streaming queries redefining watermark on the same logical plan node.
+
 Inputs:
-- `orders` CDC stream
-- `sessions` CDC stream
-- `products` CDC stream
-- `request_log` direct Kafka stream
-- `users` JDBC snapshot
-- `orders` JDBC snapshot
+- `orders` CDC stream — two independent instances (`orders_kpi` for KPI aggregator, `orders_region` for region aggregator)
+- `user_events` CDC stream — activity enricher
+- `request_log` direct Kafka stream — two independent instances (`request_log_kpi`, `request_log_region`)
+- `products` CDC stream — KPI aggregator
 
 Main transforms:
 
@@ -164,9 +199,9 @@ File:
 - [`src/streaming/transforms/kpi_aggregator.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/transforms/kpi_aggregator.py)
 
 Reads:
-- completed orders
-- active sessions
-- request logs
+- completed orders (revenue, order count — `amount` field from fat-event row)
+- active sessions (active user count)
+- request logs (error rate, latency)
 
 Computes:
 - `activeUsers`
@@ -192,18 +227,20 @@ Also writes alert state directly from the KPI batch:
 File:
 - [`src/streaming/transforms/alert_evaluator.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/transforms/alert_evaluator.py)
 
-This query still evaluates KPI windows into rule rows and maintains a fresh alert stream on the transaction side. The KPI writer also maintains alert Redis state as a pragmatic fallback so `/api/alerts` stays populated even if the evaluator is delayed.
+Evaluates KPI windows into rule rows and maintains a fresh alert stream on the transaction side. The KPI writer also maintains alert Redis state as a pragmatic fallback so `/api/alerts` stays populated even if the evaluator is delayed.
 
 #### Activity Enricher
 
 File:
 - [`src/streaming/transforms/activity_enricher.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/transforms/activity_enricher.py)
 
-Current operational source:
-- request log stream
+Source:
+- `pg.public.user_events` CDC stream
 
-Current purpose:
-- turn live request traffic into a readable activity feed for API verification and dashboard testing
+Extracts from fat-event fields already present in each row:
+- `user_display_name` — primary user-facing display field
+- `amount` — real transaction amount
+- `city`, `country_code` — formatted as `"City, CC"` in the activity entry
 
 Writes:
 - Redis list `nexus:activity:feed`
@@ -215,7 +252,7 @@ File:
 - [`src/streaming/transforms/region_aggregator.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/transforms/region_aggregator.py)
 
 Reads:
-- completed orders
+- completed orders (`region_name` from fat-event row)
 - request logs
 
 Computes:
@@ -226,11 +263,9 @@ Writes:
 - Redis string `nexus:regions:current`
 - Pub/Sub channel `nexus.regions`
 
-The same `foreachBatch` also derives top flows from the latest ranked regions and writes:
+The same `foreachBatch` derives top flows from the latest ranked regions and writes:
 - Redis string `nexus:flows:current`
 - Pub/Sub channel `nexus.flows`
-
-This was collapsed into the same query to avoid a second stateful stream and to remove a broken checkpoint path that was crashing the job.
 
 ### 2. Infrastructure Job
 
@@ -275,12 +310,7 @@ Purpose:
 - device/platform breakdown
 
 Inputs:
-- `sessions` CDC stream
-- `users` JDBC snapshot
-
-Behavior:
-- seeds platform breakdown immediately from the relational user snapshot
-- then maintains a live streaming platform breakdown from sessions
+- `sessions` CDC stream — `platform` field from fat-event row
 
 Transform:
 - [`src/streaming/transforms/device_platform.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/transforms/device_platform.py)
@@ -368,13 +398,14 @@ Test UIs:
 
 ## Failure Modes That Mattered
 
-The main operational issues fixed during this alignment work were:
+The main operational issues fixed during this migration:
 
-- Avro decode failure due to unstripped Schema Registry wire header
-- missing `aggregated.kpis` publication even though downstream logic expected it
-- stale/corrupt Spark checkpoints causing `StateSchemaNotCompatible` and missing delta-file failures
-- alert summary timestamp parsing mismatch in the API
-- separate region/flow stateful queries making the transaction job more fragile than necessary
+- **Avro decode NULL rows**: Unstripped Schema Registry wire header caused `from_avro` (PERMISSIVE mode) to return NULL for every CDC record. Fixed by stripping the 5-byte header before decoding.
+- **Writer schema mismatch**: Inline Avro schemas had name/namespace mismatches with the schemas registered by Debezium. Fixed by fetching the writer schema from Schema Registry at startup using `urllib.request`.
+- **`Redefining watermark is disallowed`** (Spark 3.3+): `read_cdc_stream` / `read_direct_stream` were calling `.withWatermark()` at the source level, and aggregators were calling it again after union. Fixed by removing all watermark calls from source readers.
+- **Shared DataFrame instances**: Passing the same `orders` / `request_log` DataFrame to multiple streaming queries caused Spark to see duplicate watermark definitions on the same logical plan. Fixed by creating independent stream instances per query.
+- **`ProcessingTimeExecutor: Current batch is falling behind`**: Caused by single executor core shared across four streaming queries + `startingOffsets=earliest` draining 1000–1500 messages on first batch. Fixed by switching CDC streams to `latest`, raising trigger intervals from 10s to 30s, adding a second Spark worker (4 cores), and allocating 2 executor cores per job.
+- **JDBC per-batch reads removed**: Original design read PostgreSQL on every Spark micro-batch for user/product dimension lookups. Replaced by fat-event denormalization — all dimension fields are embedded at write time in the generator.
 
 ## Practical Runtime Summary
 
@@ -391,14 +422,14 @@ sequenceDiagram
     participant API as FastAPI
     participant UI as Monitor/Dashboard
 
-    Gen->>PG: insert/update rows
+    Gen->>PG: insert rows (fat events with all dimension fields)
     PG->>DBZ: WAL changes
-    DBZ->>K: CDC events
+    DBZ->>K: CDC events (Confluent Avro, writer schema in registry)
     Gen->>K: raw.request_log + raw.system_metrics
 
-    K->>STX: orders/sessions/requests
-    K->>SINF: request_log/system_metrics
-    K->>SD: sessions
+    K->>STX: orders/user_events/request_log (latest offsets, 30s trigger)
+    K->>SINF: request_log/system_metrics (latest offsets, 30s trigger)
+    K->>SD: sessions (latest offsets, 30s trigger)
 
     STX->>K: aggregated.kpis
     STX->>R: kpi, alerts, activity, regions, flows

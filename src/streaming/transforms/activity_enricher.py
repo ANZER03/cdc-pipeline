@@ -16,7 +16,6 @@ from streaming.redis_client import NexusRedisWriter
 
 
 def write_activity_batch(batch_df: DataFrame, batch_id: int) -> None:
-    del batch_id
     rows = batch_df.orderBy(F.col("timestamp").desc()).limit(15).collect()
     if not rows:
         return
@@ -27,43 +26,37 @@ def write_activity_batch(batch_df: DataFrame, batch_id: int) -> None:
         writer.push_to_list(REDIS_KEY_ACTIVITY_FEED, payload, max_len=15, channel=CHANNEL_ACTIVITY)
 
 
-def build_activity_feed(
-    user_events_df: DataFrame, users_df: DataFrame, orders_df: DataFrame
-) -> DataFrame:
-    del users_df
-    del orders_df
-
+def build_activity_feed(user_events_df: DataFrame) -> DataFrame:
     mapped = user_events_df.withColumn(
         "action",
-        F.when(F.col("endpoint").contains("checkout"), F.lit("purchase"))
-        .when(F.col("endpoint").contains("cart"), F.lit("cart"))
-        .when(F.col("endpoint").contains("auth"), F.lit("login"))
+        F.when(F.col("event_type") == "checkout_complete", F.lit("purchase"))
+        .when(F.col("event_type") == "login", F.lit("login"))
+        .when(F.col("event_type") == "add_to_cart", F.lit("cart"))
         .otherwise(F.lit("view")),
     )
 
-    return (
-        mapped
-        .select(
-            F.concat(F.lit("evt_"), F.col("id").cast("string")).alias("id"),
-            F.concat(F.lit("User "), F.coalesce(F.col("user_id").cast("string"), F.lit("0"))).alias(
-                "user"
-            ),
-            F.col("action"),
-            F.when(F.col("action") == "purchase", F.lit(149.99))
-            .otherwise(F.lit(None))
-            .alias("amount"),
-            F.date_format(F.col("created_at"), "yyyy-MM-dd'T'HH:mm:ss.SSSXXX").alias("timestamp"),
-            F.concat_ws(", ", F.coalesce(F.col("region_name"), F.lit("Unknown")), F.lit("--")).alias(
-                "location"
-            ),
+    return mapped.select(
+        F.concat(F.lit("evt_"), F.col("id").cast("string")).alias("id"),
+        F.coalesce(
+            F.col("user_display_name"),
+            F.concat(F.lit("User "), F.col("user_id").cast("string")),
+        ).alias("user"),
+        F.col("action"),
+        F.when(F.col("event_type") == "checkout_complete", F.col("amount"))
+        .otherwise(F.lit(None))
+        .alias("amount"),
+        F.date_format(F.col("created_at"), "yyyy-MM-dd'T'HH:mm:ss.SSSXXX").alias("timestamp"),
+        F.when(
+            F.col("city").isNotNull() & F.col("country_code").isNotNull(),
+            F.concat_ws(", ", F.col("city"), F.col("country_code")),
         )
+        .otherwise(F.coalesce(F.col("region_name"), F.lit("Unknown")))
+        .alias("location"),
     )
 
 
-def start_activity_enricher(
-    user_events_df: DataFrame, users_df: DataFrame, orders_df: DataFrame
-) -> StreamingQuery:
-    frame = build_activity_feed(user_events_df, users_df, orders_df)
+def start_activity_enricher(user_events_df: DataFrame) -> StreamingQuery:
+    frame = build_activity_feed(user_events_df)
     return (
         frame.writeStream.outputMode("append")
         .foreachBatch(write_activity_batch)

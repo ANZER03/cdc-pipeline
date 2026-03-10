@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import cast
 
 from pyspark.sql import DataFrame, Row
 from pyspark.sql import functions as F
@@ -52,8 +52,19 @@ def _serialize_kpi_row(row: Row) -> dict[str, float | int]:
 
 
 def write_kpi_batch(batch_df: DataFrame, batch_id: int) -> None:
-    del batch_id
-    rows = batch_df.orderBy(F.col("updatedAt").desc()).limit(1).collect()
+    if batch_df.isEmpty():
+        return
+    # Pick the most data-rich window: prefer windows where all three source streams have
+    # contributed (activeUsers > 0, latency > 0, orders > 0).  Among equally rich windows
+    # prefer the most recent one (highest updatedAt).
+    rows = (
+        batch_df.orderBy(
+            (F.col("activeUsers") + F.col("orders") + F.col("latency")).desc(),
+            F.col("updatedAt").desc(),
+        )
+        .limit(1)
+        .collect()
+    )
     if not rows:
         return
 

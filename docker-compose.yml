@@ -85,7 +85,7 @@ services:
     container_name: nexus-kafka-ui
     hostname: kafka-ui
     ports:
-      - "8080:8080"
+      - "8089:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: "nexus"
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-1:9092,kafka-2:9093"
@@ -278,9 +278,37 @@ services:
     container_name: nexus-spark-worker
     hostname: spark-worker
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "8091:8081"
     environment:
       SPARK_NO_DAEMONIZE: "true"
-      SPARK_WORKER_CORES: 3
+      SPARK_WORKER_CORES: 4
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_WEBUI_PORT: 8081
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - nexus-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  spark-worker-2:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/spark/Dockerfile
+    container_name: nexus-spark-worker-2
+    hostname: spark-worker-2
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "8092:8081"
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: 4
       SPARK_WORKER_MEMORY: 2g
       SPARK_WORKER_WEBUI_PORT: 8081
     depends_on:
@@ -301,6 +329,8 @@ services:
       dockerfile: infrastructure/docker/spark/Dockerfile
     container_name: nexus-spark-job-transactions
     hostname: spark-job-transactions
+    ports:
+      - "4040:4040"
     depends_on:
       debezium-init:
         condition: service_completed_successfully
@@ -309,6 +339,8 @@ services:
       spark-master:
         condition: service_healthy
       spark-worker:
+        condition: service_healthy
+      spark-worker-2:
         condition: service_healthy
     volumes:
       - ./src:/opt/nexus/src:ro
@@ -323,13 +355,15 @@ services:
       - --name
       - nexus-transactions
       - --total-executor-cores
-      - "1"
+      - "2"
       - --executor-cores
       - "1"
       - --executor-memory
       - 512M
       - --conf
-      - spark.ui.enabled=false
+      - spark.ui.enabled=true
+      - --conf
+      - spark.ui.port=4040
       - --conf
       - spark.driver.bindAddress=0.0.0.0
       - --conf
@@ -353,6 +387,8 @@ services:
       dockerfile: infrastructure/docker/spark/Dockerfile
     container_name: nexus-spark-job-infrastructure
     hostname: spark-job-infrastructure
+    ports:
+      - "4041:4041"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -361,6 +397,8 @@ services:
       spark-master:
         condition: service_healthy
       spark-worker:
+        condition: service_healthy
+      spark-worker-2:
         condition: service_healthy
     volumes:
       - ./src:/opt/nexus/src:ro
@@ -375,13 +413,15 @@ services:
       - --name
       - nexus-infrastructure
       - --total-executor-cores
-      - "1"
+      - "2"
       - --executor-cores
       - "1"
       - --executor-memory
       - 512M
       - --conf
-      - spark.ui.enabled=false
+      - spark.ui.enabled=true
+      - --conf
+      - spark.ui.port=4041
       - --conf
       - spark.driver.bindAddress=0.0.0.0
       - --conf
@@ -405,6 +445,8 @@ services:
       dockerfile: infrastructure/docker/spark/Dockerfile
     container_name: nexus-spark-job-derived
     hostname: spark-job-derived
+    ports:
+      - "4042:4042"
     depends_on:
       debezium-init:
         condition: service_completed_successfully
@@ -413,6 +455,8 @@ services:
       spark-master:
         condition: service_healthy
       spark-worker:
+        condition: service_healthy
+      spark-worker-2:
         condition: service_healthy
     volumes:
       - ./src:/opt/nexus/src:ro
@@ -427,13 +471,15 @@ services:
       - --name
       - nexus-derived
       - --total-executor-cores
-      - "1"
+      - "2"
       - --executor-cores
       - "1"
       - --executor-memory
       - 512M
       - --conf
-      - spark.ui.enabled=false
+      - spark.ui.enabled=true
+      - --conf
+      - spark.ui.port=4042
       - --conf
       - spark.driver.bindAddress=0.0.0.0
       - --conf
