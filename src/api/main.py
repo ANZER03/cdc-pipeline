@@ -11,6 +11,7 @@ from api.routes.generator import router as generator_router
 from api.routes.events import router as events_router
 from api.routes.monitor import router as monitor_router
 from api.routes.snapshots import router as snapshots_router
+from api.routes.ws import router as ws_router
 
 app = FastAPI(title="Nexus API", version="0.1.0")
 
@@ -23,6 +24,7 @@ app.add_middleware(
 
 app.include_router(snapshots_router)
 app.include_router(events_router)
+app.include_router(ws_router)
 app.include_router(generator_router)
 app.include_router(monitor_router)
 
