@@ -3,7 +3,10 @@
 
 Uses Faker for realistic e-commerce simulation (Amazon-like):
 real names, addresses, product names, user agents, and behaviour patterns.
-Supports high-throughput via batched SQL and configurable presets.
+
+High-throughput postgres path uses a native psycopg2 connection pool with
+concurrent worker threads — no docker exec overhead.  Falls back to subprocess
+(docker exec psql) when psycopg2 is not installed.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import csv
 import json
 import math
 import os
+import queue
 import random
 import re
 import subprocess
@@ -34,10 +38,22 @@ try:
 except ImportError:
     _HAS_FAKER = False
 
+try:
+    import psycopg2 as psycopg2  # noqa: PLC0414
+    import psycopg2.extras
+
+    _HAS_PSYCOPG2 = True
+except ImportError:
+    psycopg2 = None  # type: ignore[assignment]
+    _HAS_PSYCOPG2 = False
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("SQL_COMMAND_TIMEOUT_SECONDS", "120"))
 KAFKA_PRODUCE_TIMEOUT_SECONDS = int(os.getenv("KAFKA_PRODUCE_TIMEOUT_SECONDS", "120"))
+
+# Maximum concurrent postgres worker threads
+MAX_PG_WORKERS = int(os.getenv("MAX_PG_WORKERS", "32"))
 
 # ---------------------------------------------------------------------------
 # Avro schemas (unchanged — schema contract must not break)
@@ -76,7 +92,7 @@ SYSTEM_METRIC_SCHEMA = {
 }
 
 # ---------------------------------------------------------------------------
-# Regions — fixed list that Spark aggregates on (coordinates must not change)
+# Regions — fixed list (coordinates must not change, Spark aggregates on name)
 # ---------------------------------------------------------------------------
 
 REGIONS = [
@@ -91,7 +107,6 @@ REGIONS = [
     "South Africa",
 ]
 
-# Weights: more traffic from large consumer markets
 REGION_WEIGHTS = [0.20, 0.18, 0.16, 0.10, 0.10, 0.06, 0.08, 0.08, 0.04]
 
 # ---------------------------------------------------------------------------
@@ -122,7 +137,7 @@ PLATFORMS = list(PLATFORM_AGENTS.keys())
 PLATFORM_WEIGHTS = [0.40, 0.25, 0.20, 0.15]
 
 # ---------------------------------------------------------------------------
-# Product catalog — realistic categories with price ranges
+# Product catalog
 # ---------------------------------------------------------------------------
 
 PRODUCT_CATEGORIES: dict[str, dict[str, Any]] = {
@@ -145,7 +160,7 @@ PRODUCT_CATEGORIES: dict[str, dict[str, Any]] = {
             "Smart Home Hub",
         ],
         "price_range": (15.0, 2500.0),
-        "price_distribution": "log_normal",  # most items cheaper, a few expensive
+        "price_distribution": "log_normal",
     },
     "Books": {
         "items": [
@@ -222,7 +237,7 @@ PRODUCT_CATEGORIES: dict[str, dict[str, Any]] = {
             "Pull-Up Bar Doorway",
             "Foam Roller Deep Tissue",
             "Trekking Poles Carbon",
-            "Sleeping Bag -20°C",
+            "Sleeping Bag -20C",
             "Kayak Paddle Lightweight",
             "Golf Club Set Beginner",
             "Tennis Racket Graphite",
@@ -237,7 +252,7 @@ ALL_CATEGORY_NAMES = list(PRODUCT_CATEGORIES.keys())
 CATEGORY_WEIGHTS = [0.30, 0.15, 0.20, 0.20, 0.15]
 
 # ---------------------------------------------------------------------------
-# Request endpoints — expanded to resemble a real e-commerce API
+# Request endpoints
 # ---------------------------------------------------------------------------
 
 REQUEST_ENDPOINTS = [
@@ -263,36 +278,38 @@ REQUEST_ENDPOINTS = [
     ("DELETE", "/api/wishlist/{id}"),
 ]
 
-# Weighted so reads dominate (realistic API traffic)
 ENDPOINT_WEIGHTS = [
     0.12,
     0.08,
     0.10,
-    0.08,  # product browse/search
+    0.08,
     0.06,
     0.05,
-    0.02,  # cart
+    0.02,
     0.04,
-    0.02,  # checkout
-    0.05,
-    0.03,  # orders
-    0.04,
-    0.01,  # profile
-    0.06,  # recommendations
-    0.04,  # deals
-    0.05,
-    0.02,  # reviews
+    0.02,
     0.05,
     0.03,
-    0.02,  # wishlist
+    0.04,
+    0.01,
+    0.06,
+    0.04,
+    0.05,
+    0.02,
+    0.05,
+    0.03,
+    0.02,
 ]
 
 # ---------------------------------------------------------------------------
-# User journey patterns — Amazon-like behavioural flows
+# User journey patterns
+# All purchase-intent patterns MUST contain "checkout_start" — that is the
+# gate that creates the orders row.  Weights are tuned so ~75% of cycles
+# create an order.
 # ---------------------------------------------------------------------------
 
 USER_EVENT_PATTERNS = [
-    # Full purchase funnel (search → browse → add to cart → buy)
+    # 0 — full purchase funnel
     [
         "login",
         "page_view",
@@ -302,40 +319,34 @@ USER_EVENT_PATTERNS = [
         "checkout_start",
         "checkout_complete",
     ],
-    # Browse and logout without buying
-    ["login", "page_view", "page_view", "logout"],
-    # Passive browsing (no login)
-    ["page_view", "page_view", "page_view"],
-    # Search and compare (multiple products)
-    ["login", "search", "page_view", "page_view", "page_view", "logout"],
-    # Add to wishlist flow
-    ["login", "page_view", "add_to_wishlist", "page_view", "add_to_wishlist", "logout"],
-    # Deep funnel: cart abandonment after checkout_start
-    ["login", "page_view", "add_to_cart", "checkout_start", "logout"],
-    # Repeat buyer: quick checkout
+    # 1 — quick repeat buy
     ["login", "add_to_cart", "checkout_start", "checkout_complete"],
-    # Return / refund flow
-    ["login", "page_view", "checkout_complete", "return_request"],
-    # Review submission after purchase
-    ["login", "page_view", "checkout_complete", "review_submit"],
-    # Window shopping with recommendations
-    ["page_view", "page_view", "view_recommendations", "page_view"],
-    # Mobile quick-buy
+    # 2 — mobile quick-buy
     ["login", "search", "add_to_cart", "checkout_start", "checkout_complete"],
-    # Category browse
+    # 3 — cart abandonment (still creates the order row in pending state)
+    ["login", "page_view", "add_to_cart", "checkout_start", "logout"],
+    # 4 — return/refund (needs an order first)
+    ["login", "page_view", "add_to_cart", "checkout_start", "checkout_complete", "return_request"],
+    # 5 — review after purchase
+    ["login", "page_view", "add_to_cart", "checkout_start", "checkout_complete", "review_submit"],
+    # 6 — browse and logout without buying
+    ["login", "page_view", "page_view", "logout"],
+    # 7 — passive browsing (no login)
+    ["page_view", "page_view", "page_view"],
+    # 8 — search and compare
+    ["login", "search", "page_view", "page_view", "page_view", "logout"],
+    # 9 — wishlist flow
+    ["login", "page_view", "add_to_wishlist", "page_view", "add_to_wishlist", "logout"],
+    # 10 — window shopping with recommendations
+    ["page_view", "page_view", "view_recommendations", "page_view"],
+    # 11 — category browse
     ["page_view", "search", "page_view", "page_view", "page_view", "logout"],
 ]
 
-# Weights: full funnel less common than casual browsing
-PATTERN_WEIGHTS = [0.10, 0.12, 0.15, 0.10, 0.08, 0.08, 0.07, 0.05, 0.05, 0.08, 0.06, 0.06]
+# checkout_start patterns: 0,1,2,3,4,5 → combined weight = 0.75
+PATTERN_WEIGHTS = [0.18, 0.15, 0.12, 0.12, 0.09, 0.09, 0.06, 0.05, 0.04, 0.04, 0.03, 0.03]
 
-NODES = [
-    "api-node-1",
-    "api-node-2",
-    "api-node-3",
-    "db-node-1",
-    "cache-node-1",
-]
+NODES = ["api-node-1", "api-node-2", "api-node-3", "db-node-1", "cache-node-1"]
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -370,18 +381,14 @@ DEFAULT_PRODUCTS = [
     ProductRecord(id=12, price=59.0, merchant_region="North America (West)", category="Clothing"),
 ]
 
-SIZE_MULTIPLIERS = {
-    "small": 1,
-    "medium": 2,
-    "large": 4,
-}
+SIZE_MULTIPLIERS = {"small": 1, "medium": 2, "large": 4}
 
 PRESET_DEFAULTS = {
     "light": {"rate": 5, "duration": 120, "size": "small", "error_rate": 0.02},
     "demo": {"rate": 20, "duration": 300, "size": "medium", "error_rate": 0.05},
     "stress": {"rate": 60, "duration": 600, "size": "large", "error_rate": 0.12},
     "high": {"rate": 100, "duration": 300, "size": "large", "error_rate": 0.08},
-    "extreme": {"rate": 200, "duration": 180, "size": "large", "error_rate": 0.10},
+    "extreme": {"rate": 1000, "duration": 180, "size": "large", "error_rate": 0.10},
 }
 
 
@@ -390,11 +397,101 @@ class GeneratorState:
     next_request_log_id: int
     next_system_metric_id: int
     active_sessions: dict[int, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
     user_cursor: int = 0
+
+    def next_user(self, users: list[UserRecord]) -> UserRecord:
+        with self._lock:
+            user = users[self.user_cursor % len(users)]
+            self.user_cursor += 1
+            return user
+
+    def get_or_create_session(self, user_id: int) -> tuple[str, bool]:
+        """Return (session_id, is_new).  25% chance of creating a fresh one."""
+        with self._lock:
+            existing = self.active_sessions.get(user_id)
+            if existing is None or random.random() < 0.25:
+                sid = str(uuid.uuid4())
+                self.active_sessions[user_id] = sid
+                return sid, True
+            return existing, False
+
+    def close_session(self, user_id: int) -> None:
+        with self._lock:
+            self.active_sessions.pop(user_id, None)
+
+    def next_request_id(self) -> int:
+        with self._lock:
+            self.next_request_log_id += 1
+            return self.next_request_log_id
+
+    def next_metric_id(self) -> int:
+        with self._lock:
+            self.next_system_metric_id += 1
+            return self.next_system_metric_id
 
 
 # ---------------------------------------------------------------------------
-# Faker helpers
+# Native psycopg2 connection pool
+# ---------------------------------------------------------------------------
+
+
+class _PgPool:
+    """Minimal thread-local connection pool backed by psycopg2."""
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+        self._local = threading.local()
+
+    def conn(self) -> Any:
+        c = getattr(self._local, "conn", None)
+        if c is None or c.closed:
+            c = psycopg2.connect(self._dsn)
+            c.autocommit = False
+            self._local.conn = c
+        return c
+
+    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
+        conn = self.conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def execute_returning(self, sql: str, params: tuple[Any, ...] | None = None) -> Any:
+        conn = self.conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            conn.commit()
+            return row[0] if row else None
+        except Exception:
+            conn.rollback()
+            raise
+
+    def executemany_in_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        if not statements:
+            return
+        conn = self.conn()
+        try:
+            with conn.cursor() as cur:
+                for sql, params in statements:
+                    cur.execute(sql, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+_pg_pool: _PgPool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Faker / data helpers
 # ---------------------------------------------------------------------------
 
 
@@ -407,17 +504,9 @@ def faker_ip() -> str:
 def faker_user_agent(platform: str | None) -> str:
     plat = platform or random.choices(PLATFORMS, weights=PLATFORM_WEIGHTS)[0]
     agents = PLATFORM_AGENTS.get(plat, PLATFORM_AGENTS["Desktop"])
-    if _HAS_FAKER:
-        # occasionally use a fully random Faker UA
-        if random.random() < 0.15:
-            return _faker.user_agent()
+    if _HAS_FAKER and random.random() < 0.15:
+        return _faker.user_agent()
     return random.choice(agents)
-
-
-def faker_display_name() -> str:
-    if _HAS_FAKER:
-        return _faker.name()
-    return f"User{random.randint(1000, 9999)}"
 
 
 def faker_product_name(category: str | None = None) -> str:
@@ -425,46 +514,15 @@ def faker_product_name(category: str | None = None) -> str:
     return random.choice(PRODUCT_CATEGORIES[cat]["items"])
 
 
-def realistic_price(category: str | None = None) -> float:
-    cat = category or random.choices(ALL_CATEGORY_NAMES, weights=CATEGORY_WEIGHTS)[0]
-    cfg = PRODUCT_CATEGORIES[cat]
-    lo, hi = cfg["price_range"]
-    if cfg["price_distribution"] == "log_normal":
-        # log-normal centred around geometric mean of range
-        mu = (math.log(lo) + math.log(hi)) / 2
-        sigma = (math.log(hi) - math.log(lo)) / 4
-        price = math.exp(random.gauss(mu, sigma))
-        price = max(lo, min(hi, price))
-    else:
-        price = random.uniform(lo, hi)
-    # Round to nearest .99 or .00 — e-commerce pricing
-    rounded = round(price, 2)
-    if random.random() < 0.60:
-        rounded = round(price) - 0.01
-    return max(0.01, rounded)
-
-
 def realistic_latency_ms(error: bool = False) -> int:
-    """Log-normal latency with occasional long-tail spikes (P99 > 200ms)."""
     if error:
-        # errors tend to be faster (auth fail) or slower (timeouts)
         if random.random() < 0.4:
-            return random.randint(2, 30)  # fast client error
-        return random.randint(150, 3000)  # slow server error / timeout
-    # Base: log-normal, median ~65ms, mean ~90ms
+            return random.randint(2, 30)
+        return random.randint(150, 3000)
     ms = math.exp(random.gauss(4.2, 0.7))
-    # 3% chance of a spike (P99 behaviour)
     if random.random() < 0.03:
         ms += random.uniform(200, 1500)
     return max(1, int(ms))
-
-
-def pick_region() -> str:
-    return random.choices(REGIONS, weights=REGION_WEIGHTS)[0]
-
-
-def pick_platform() -> str:
-    return random.choices(PLATFORMS, weights=PLATFORM_WEIGHTS)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +538,12 @@ def parse_args() -> argparse.Namespace:
         default="custom",
     )
     parser.add_argument("--mode", choices=["all", "postgres", "kafka"], default="all")
-    parser.add_argument("--rate", type=int, default=10, help="Target request events per second")
+    parser.add_argument(
+        "--rate",
+        type=int,
+        default=10,
+        help="Target cycles/orders per second (postgres) or records/s (kafka)",
+    )
     parser.add_argument("--duration", type=int, default=300, help="Run length in seconds")
     parser.add_argument("--size", choices=["small", "medium", "large"], default="medium")
     parser.add_argument(
@@ -488,6 +551,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--users", type=str, default="", help="Optional CSV file for users")
     parser.add_argument("--postgres-container", default="nexus-postgres")
+    parser.add_argument(
+        "--pg-dsn",
+        default=os.getenv(
+            "PG_DSN",
+            "host=localhost port=5432 dbname={db} user={user} password={pw}".format(
+                db=os.getenv("POSTGRES_DB", "nexus_db"),
+                user=os.getenv("POSTGRES_USER", "admin"),
+                pw=os.getenv("POSTGRES_PASSWORD", "admin"),
+            ),
+        ),
+        help="psycopg2 DSN for direct postgres connection (used when psycopg2 is available)",
+    )
     parser.add_argument(
         "--schema-registry-url",
         default=os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
@@ -510,7 +585,6 @@ def size_multiplier(size: str) -> int:
 def apply_preset_defaults(args: argparse.Namespace) -> argparse.Namespace:
     if args.preset == "custom":
         return args
-
     preset = PRESET_DEFAULTS[args.preset]
     if args.rate == 10:
         args.rate = preset["rate"]
@@ -524,7 +598,7 @@ def apply_preset_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Database helpers
+# Subprocess (fallback) helpers
 # ---------------------------------------------------------------------------
 
 
@@ -606,8 +680,7 @@ def load_users_from_csv(file_path: str) -> list[UserRecord]:
 
 def load_products(container: str) -> list[ProductRecord]:
     rows = run_sql(
-        container,
-        "SELECT id, price, COALESCE(merchant_region, '') FROM products ORDER BY id;",
+        container, "SELECT id, price, COALESCE(merchant_region, '') FROM products ORDER BY id;"
     )
     products = []
     for line in rows.splitlines():
@@ -623,8 +696,6 @@ def load_products(container: str) -> list[ProductRecord]:
 
 
 def load_state(container: str) -> GeneratorState:
-    request_log_max = run_sql(container, "SELECT 1000000;")
-    system_metric_max = run_sql(container, "SELECT 2000000;")
     active = run_sql(
         container, "SELECT user_id, id FROM sessions WHERE is_active = true AND ended_at IS NULL;"
     )
@@ -635,21 +706,18 @@ def load_state(container: str) -> GeneratorState:
         user_id, session_id = line.split("|")
         active_sessions[int(user_id)] = session_id
     return GeneratorState(
-        next_request_log_id=int(request_log_max),
-        next_system_metric_id=int(system_metric_max),
+        next_request_log_id=1_000_000,
+        next_system_metric_id=2_000_000,
         active_sessions=active_sessions,
     )
 
 
 def default_state() -> GeneratorState:
-    return GeneratorState(
-        next_request_log_id=1_000_000,
-        next_system_metric_id=2_000_000,
-    )
+    return GeneratorState(next_request_log_id=1_000_000, next_system_metric_id=2_000_000)
 
 
 # ---------------------------------------------------------------------------
-# SQL value encoding
+# SQL value encoding (subprocess path)
 # ---------------------------------------------------------------------------
 
 
@@ -671,14 +739,9 @@ def sql_literal(value: Any) -> str:
     return f"'{text}'"
 
 
-def execute_statements(container: str, statements: list[str], summary_only: bool) -> None:
+def execute_statements_subprocess(container: str, statements: list[str]) -> None:
     if not statements:
         return
-    if summary_only:
-        for statement in statements:
-            print(statement)
-        return
-    # Batch all statements in a single psql call — avoids per-statement subprocess overhead
     run_sql(container, "\n".join(statements))
 
 
@@ -695,7 +758,6 @@ def produce_avro_records(
 ) -> None:
     if not records:
         return
-
     command = [
         "docker",
         "exec",
@@ -712,10 +774,7 @@ def produce_avro_records(
         f"value.schema={json.dumps(schema, separators=(',', ':'))}",
     ]
     payload = (
-        "\n".join(
-            json.dumps(_encode_avro_json(record, schema), separators=(",", ":"))
-            for record in records
-        )
+        "\n".join(json.dumps(_encode_avro_json(r, schema), separators=(",", ":")) for r in records)
         + "\n"
     )
     subprocess.run(
@@ -737,7 +796,6 @@ def _encode_avro_json(value: Any, schema: Any) -> Any:
                 continue
             return {_union_branch_name(branch): _encode_avro_json(value, branch)}
         raise ValueError(f"Unable to encode union value for schema: {schema!r}")
-
     if isinstance(schema, dict):
         schema_type = schema.get("type")
         if isinstance(schema_type, list):
@@ -746,11 +804,10 @@ def _encode_avro_json(value: Any, schema: Any) -> Any:
             if value is None:
                 return None
             return {
-                field["name"]: _encode_avro_json(value.get(field["name"]), field["type"])
-                for field in schema["fields"]
+                f["name"]: _encode_avro_json(value.get(f["name"]), f["type"])
+                for f in schema["fields"]
             }
         return value
-
     return value
 
 
@@ -764,57 +821,241 @@ def _union_branch_name(branch: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# User / product selection
+# Cycle helpers — shared between both postgres backends
 # ---------------------------------------------------------------------------
 
 
-def choose_user(users: list[UserRecord], state: GeneratorState) -> UserRecord:
-    user = users[state.user_cursor % len(users)]
-    state.user_cursor += 1
-    return user
-
-
-def choose_product(products: list[ProductRecord]) -> ProductRecord:
-    return random.choice(products)
-
-
-def page_url_for(product: ProductRecord | None, event_type: str | None = None) -> str:
-    if event_type == "search":
-        queries = ["wireless headphones", "running shoes", "smart home", "gifts", "deals today"]
-        return f"/search?q={random.choice(queries).replace(' ', '+')}"
-    if event_type == "view_recommendations":
-        return "/recommendations"
-    if product is None:
-        return random.choice(["/home", "/collections/new", "/search", "/deals", "/bestsellers"])
-    return f"/products/{product.id}"
-
-
-# ---------------------------------------------------------------------------
-# Postgres cycle — one "user journey" per call (batched SQL)
-# ---------------------------------------------------------------------------
-
-
-def generate_postgres_cycle(
-    container: str,
+def _build_cycle_data(
     users: list[UserRecord],
     products: list[ProductRecord],
     state: GeneratorState,
-    summary_only: bool,
-) -> None:
-    user = choose_user(users, state)
-    product = choose_product(products)
+) -> dict[str, Any]:
+    """Assemble all the data for one user-journey cycle (no I/O)."""
+    user = state.next_user(users)
+    product = random.choice(products)
     now = datetime.now(timezone.utc)
-    session_id = state.active_sessions.get(user.id)
-
-    # Derive realistic user-agent and IP
+    session_id, is_new_session = state.get_or_create_session(user.id)
     user_agent = faker_user_agent(user.platform)
     ip_address = faker_ip()
+    pattern = random.choices(USER_EVENT_PATTERNS, weights=PATTERN_WEIGHTS)[0]
+    qty = random.randint(1, 4)
+    order_total = round(product.price * qty, 2)
+    has_order = "checkout_start" in pattern
 
-    # Possibly start a new session (25% chance even if one exists)
-    if session_id is None or random.random() < 0.25:
-        session_id = str(uuid.uuid4())
-        state.active_sessions[user.id] = session_id
-        execute_statements(
+    error_roll = random.random()
+    if error_roll < 0.05:
+        final_status = "failed"
+    elif error_roll < 0.08:
+        final_status = "refunded"
+    else:
+        final_status = "completed"
+
+    close_session = random.random() < 0.15
+
+    return dict(
+        user=user,
+        product=product,
+        now=now,
+        session_id=session_id,
+        is_new_session=is_new_session,
+        user_agent=user_agent,
+        ip_address=ip_address,
+        pattern=pattern,
+        qty=qty,
+        order_total=order_total,
+        has_order=has_order,
+        final_status=final_status,
+        close_session=close_session,
+    )
+
+
+def _event_metadata(
+    event_type: str, product: ProductRecord, qty: int, order_total: float, order_id: int | None
+) -> dict[str, Any]:
+    if event_type == "add_to_cart":
+        return {"product_id": product.id, "quantity": qty, "category": product.category}
+    if event_type == "checkout_start":
+        return {"cart_value": order_total, "order_id": order_id, "item_count": qty}
+    if event_type == "checkout_complete":
+        return {"order_id": order_id or 0, "total": order_total, "currency": "USD"}
+    if event_type == "login":
+        return {"auth_method": random.choice(["password", "google", "otp", "biometric"])}
+    if event_type == "logout":
+        return {"session_duration_s": random.randint(30, 1800)}
+    if event_type == "page_view":
+        return {"product_id": product.id, "category": product.category or ""}
+    if event_type == "search":
+        return {
+            "query": faker_product_name(product.category),
+            "result_count": random.randint(0, 200),
+        }
+    if event_type == "add_to_wishlist":
+        return {"product_id": product.id, "wishlist_size": random.randint(1, 20)}
+    if event_type == "return_request":
+        return {
+            "order_id": order_id or 0,
+            "reason": random.choice(["defective", "wrong_item", "changed_mind", "too_small"]),
+        }
+    if event_type == "review_submit":
+        return {"product_id": product.id, "rating": random.randint(1, 5), "verified_purchase": True}
+    if event_type == "view_recommendations":
+        return {
+            "algorithm": random.choice(["collaborative", "content_based", "trending"]),
+            "count": 12,
+        }
+    return {}
+
+
+def _page_url(event_type: str, product: ProductRecord) -> str:
+    if event_type == "search":
+        q = faker_product_name(product.category).replace(" ", "+")
+        return f"/search?q={q}"
+    if event_type == "view_recommendations":
+        return "/recommendations"
+    if event_type in {
+        "page_view",
+        "add_to_cart",
+        "checkout_start",
+        "checkout_complete",
+        "add_to_wishlist",
+        "review_submit",
+    }:
+        return f"/products/{product.id}"
+    return random.choice(["/home", "/collections/new", "/search", "/deals", "/bestsellers"])
+
+
+# ---------------------------------------------------------------------------
+# Native psycopg2 cycle
+# ---------------------------------------------------------------------------
+
+
+def _run_cycle_native(pool: "_PgPool", cd: dict[str, Any], state: GeneratorState) -> None:
+    user: UserRecord = cd["user"]
+    product: ProductRecord = cd["product"]
+    now: datetime = cd["now"]
+    session_id: str = cd["session_id"]
+
+    # Session insert
+    if cd["is_new_session"]:
+        pool.execute(
+            "INSERT INTO sessions (id, user_id, started_at, ended_at, platform, country_code, city, region_name, is_active, created_at) "
+            "VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, TRUE, %s)",
+            (
+                session_id,
+                user.id,
+                now,
+                user.platform or "Desktop",
+                user.country_code,
+                user.city,
+                user.region_name,
+                now,
+            ),
+        )
+
+    # Order insert (if pattern has checkout_start)
+    order_id: int | None = None
+    stmts: list[tuple[str, tuple[Any, ...]]] = []
+
+    if cd["has_order"]:
+        order_id = pool.execute_returning(
+            "INSERT INTO orders (user_id, total_amount, currency, status, region_name, user_display_name, platform, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                user.id,
+                cd["order_total"],
+                "USD",
+                "pending",
+                user.region_name,
+                user.display_name,
+                user.platform,
+                now + timedelta(seconds=5),
+                now + timedelta(seconds=5),
+            ),
+        )
+        stmts.append(
+            (
+                "INSERT INTO order_items (order_id, product_id, quantity, unit_price, created_at) VALUES (%s, %s, %s, %s, %s)",
+                (order_id, product.id, cd["qty"], product.price, now + timedelta(seconds=6)),
+            )
+        )
+
+    # User events
+    for step, event_type in enumerate(cd["pattern"]):
+        event_time = now + timedelta(seconds=step * random.randint(2, 8))
+        page_url = _page_url(event_type, product)
+        referrer = (
+            "/home"
+            if step == 0
+            else random.choice(["/search", "/recommendations", "/deals", page_url])
+        )
+        metadata = _event_metadata(event_type, product, cd["qty"], cd["order_total"], order_id)
+        amount = cd["order_total"] if event_type == "checkout_complete" else None
+
+        if event_type == "add_to_cart":
+            stmts.append(
+                (
+                    "INSERT INTO cart_items (user_id, product_id, quantity, added_at) VALUES (%s, %s, %s, %s)",
+                    (user.id, product.id, cd["qty"], event_time),
+                )
+            )
+
+        stmts.append(
+            (
+                "INSERT INTO user_events (user_id, event_type, page_url, referrer_url, user_agent, ip_address, session_id, metadata, user_display_name, region_name, city, country_code, platform, amount, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    user.id,
+                    event_type,
+                    page_url,
+                    referrer,
+                    cd["user_agent"],
+                    cd["ip_address"],
+                    session_id,
+                    json.dumps(metadata),
+                    user.display_name,
+                    user.region_name,
+                    user.city,
+                    user.country_code,
+                    user.platform,
+                    amount,
+                    event_time,
+                ),
+            )
+        )
+
+    pool.executemany_in_tx(stmts)
+
+    # Order status update
+    if order_id is not None:
+        completion_time = now + timedelta(seconds=random.randint(5, 30))
+        pool.execute(
+            "UPDATE orders SET status = %s, updated_at = %s WHERE id = %s",
+            (cd["final_status"], completion_time, order_id),
+        )
+
+    # Session close
+    if cd["close_session"]:
+        end_time = now + timedelta(minutes=random.randint(5, 30))
+        pool.execute(
+            "UPDATE sessions SET is_active = FALSE, ended_at = %s WHERE id = %s",
+            (end_time, session_id),
+        )
+        state.close_session(user.id)
+
+
+# ---------------------------------------------------------------------------
+# Subprocess cycle (fallback)
+# ---------------------------------------------------------------------------
+
+
+def _run_cycle_subprocess(container: str, cd: dict[str, Any], state: GeneratorState) -> None:
+    user: UserRecord = cd["user"]
+    product: ProductRecord = cd["product"]
+    now: datetime = cd["now"]
+    session_id: str = cd["session_id"]
+
+    if cd["is_new_session"]:
+        execute_statements_subprocess(
             container,
             [
                 "INSERT INTO sessions (id, user_id, started_at, ended_at, platform, country_code, city, region_name, is_active, created_at) VALUES ("
@@ -834,26 +1075,12 @@ def generate_postgres_cycle(
                 )
                 + ");"
             ],
-            summary_only,
         )
 
-    pattern = random.choices(USER_EVENT_PATTERNS, weights=PATTERN_WEIGHTS)[0]
-    statements: list[str] = []
-    order_id = None
-    qty = random.randint(1, 4)
-    order_total = round(product.price * qty, 2)
-    completion_time = now + timedelta(seconds=random.randint(5, 30))
+    order_id: int | None = None
+    stmts: list[str] = []
 
-    # Realistic error simulation
-    error_roll = random.random()
-    if error_roll < 0.05:
-        final_status = "failed"  # payment failure
-    elif error_roll < 0.08:
-        final_status = "refunded"  # immediate refund
-    else:
-        final_status = "completed"
-
-    if "checkout_start" in pattern:
+    if cd["has_order"]:
         order_id = parse_returning_id(
             run_sql(
                 container,
@@ -861,7 +1088,7 @@ def generate_postgres_cycle(
                 + ", ".join(
                     [
                         sql_literal(user.id),
-                        sql_literal(order_total),
+                        sql_literal(cd["order_total"]),
                         sql_literal("USD"),
                         sql_literal("pending"),
                         sql_literal(user.region_name),
@@ -874,13 +1101,13 @@ def generate_postgres_cycle(
                 + ") RETURNING id;",
             )
         )
-        statements.append(
+        stmts.append(
             "INSERT INTO order_items (order_id, product_id, quantity, unit_price, created_at) VALUES ("
             + ", ".join(
                 [
                     sql_literal(order_id),
                     sql_literal(product.id),
-                    sql_literal(qty),
+                    sql_literal(cd["qty"]),
                     sql_literal(product.price),
                     sql_literal(now + timedelta(seconds=6)),
                 ]
@@ -888,78 +1115,32 @@ def generate_postgres_cycle(
             + ");"
         )
 
-    for step, event_type in enumerate(pattern):
+    for step, event_type in enumerate(cd["pattern"]):
         event_time = now + timedelta(seconds=step * random.randint(2, 8))
-        metadata: dict[str, Any] = {}
-        page_url = page_url_for(
-            product
-            if event_type
-            in {
-                "page_view",
-                "add_to_cart",
-                "checkout_start",
-                "checkout_complete",
-                "add_to_wishlist",
-                "review_submit",
-            }
-            else None,
-            event_type=event_type,
-        )
+        page_url = _page_url(event_type, product)
         referrer = (
             "/home"
             if step == 0
             else random.choice(["/search", "/recommendations", "/deals", page_url])
         )
+        metadata = _event_metadata(event_type, product, cd["qty"], cd["order_total"], order_id)
+        amount = cd["order_total"] if event_type == "checkout_complete" else None
 
         if event_type == "add_to_cart":
-            metadata = {"product_id": product.id, "quantity": qty, "category": product.category}
-            statements.append(
+            stmts.append(
                 "INSERT INTO cart_items (user_id, product_id, quantity, added_at) VALUES ("
                 + ", ".join(
                     [
                         sql_literal(user.id),
                         sql_literal(product.id),
-                        str(qty),
+                        sql_literal(cd["qty"]),
                         sql_literal(event_time),
                     ]
                 )
                 + ");"
             )
-        elif event_type == "checkout_start":
-            metadata = {"cart_value": order_total, "order_id": order_id, "item_count": qty}
-        elif event_type == "checkout_complete":
-            metadata = {"order_id": order_id or 0, "total": order_total, "currency": "USD"}
-        elif event_type == "login":
-            metadata = {"auth_method": random.choice(["password", "google", "otp", "biometric"])}
-        elif event_type == "logout":
-            metadata = {"session_duration_s": random.randint(30, 1800)}
-        elif event_type == "page_view":
-            metadata = {"product_id": product.id, "category": product.category or ""}
-        elif event_type == "search":
-            metadata = {
-                "query": faker_product_name(product.category),
-                "result_count": random.randint(0, 200),
-            }
-        elif event_type == "add_to_wishlist":
-            metadata = {"product_id": product.id, "wishlist_size": random.randint(1, 20)}
-        elif event_type == "return_request":
-            metadata = {
-                "order_id": order_id or 0,
-                "reason": random.choice(["defective", "wrong_item", "changed_mind", "too_small"]),
-            }
-        elif event_type == "review_submit":
-            metadata = {
-                "product_id": product.id,
-                "rating": random.randint(1, 5),
-                "verified_purchase": True,
-            }
-        elif event_type == "view_recommendations":
-            metadata = {
-                "algorithm": random.choice(["collaborative", "content_based", "trending"]),
-                "count": 12,
-            }
 
-        statements.append(
+        stmts.append(
             "INSERT INTO user_events (user_id, event_type, page_url, referrer_url, user_agent, ip_address, session_id, metadata, user_display_name, region_name, city, country_code, platform, amount, created_at) VALUES ("
             + ", ".join(
                 [
@@ -967,8 +1148,8 @@ def generate_postgres_cycle(
                     sql_literal(event_type),
                     sql_literal(page_url),
                     sql_literal(referrer),
-                    sql_literal(user_agent),
-                    sql_literal(ip_address),
+                    sql_literal(cd["user_agent"]),
+                    sql_literal(cd["ip_address"]),
                     sql_literal(session_id),
                     sql_literal(metadata),
                     sql_literal(user.display_name),
@@ -976,50 +1157,135 @@ def generate_postgres_cycle(
                     sql_literal(user.city),
                     sql_literal(user.country_code),
                     sql_literal(user.platform),
-                    sql_literal(order_total if event_type == "checkout_complete" else None),
+                    sql_literal(amount),
                     sql_literal(event_time),
                 ]
             )
             + ");"
         )
 
-    # Flush all user_event + cart_item inserts in a single psql call
-    execute_statements(container, statements, summary_only)
+    execute_statements_subprocess(container, stmts)
 
     if order_id is not None:
-        execute_statements(
+        completion_time = now + timedelta(seconds=random.randint(5, 30))
+        execute_statements_subprocess(
             container,
             [
-                "UPDATE orders SET status = "
-                + sql_literal(final_status)
-                + ", updated_at = "
-                + sql_literal(completion_time)
-                + " WHERE id = "
-                + sql_literal(order_id)
-                + ";"
+                f"UPDATE orders SET status = {sql_literal(cd['final_status'])}, updated_at = {sql_literal(completion_time)} WHERE id = {sql_literal(order_id)};"
             ],
-            summary_only,
         )
 
-    # 15% chance to end the session
-    if random.random() < 0.15:
+    if cd["close_session"]:
         end_time = now + timedelta(minutes=random.randint(5, 30))
-        execute_statements(
+        execute_statements_subprocess(
             container,
             [
-                "UPDATE sessions SET is_active = FALSE, ended_at = "
-                + sql_literal(end_time)
-                + " WHERE id = "
-                + sql_literal(session_id)
-                + ";"
+                f"UPDATE sessions SET is_active = FALSE, ended_at = {sql_literal(end_time)} WHERE id = {sql_literal(session_id)};"
             ],
-            summary_only,
         )
-        state.active_sessions.pop(user.id, None)
+        state.close_session(user.id)
 
 
 # ---------------------------------------------------------------------------
-# Kafka payloads
+# Postgres generation loop
+# ---------------------------------------------------------------------------
+
+
+def _pg_worker(
+    stop_event: threading.Event,
+    users: list[UserRecord],
+    products: list[ProductRecord],
+    state: GeneratorState,
+    container: str,
+    pg_dsn: str,
+    summary_only: bool,
+    counter: list[int],
+    counter_lock: threading.Lock,
+) -> None:
+    """Single worker thread — runs cycles as fast as the DB allows."""
+    pool: _PgPool | None = None
+    if _HAS_PSYCOPG2 and not summary_only:
+        pool = _PgPool(pg_dsn)
+
+    while not stop_event.is_set():
+        cd = _build_cycle_data(users, products, state)
+        if summary_only:
+            print(
+                json.dumps(
+                    {"cycle": "postgres", "user_id": cd["user"].id, "has_order": cd["has_order"]}
+                )
+            )
+        elif pool is not None:
+            _run_cycle_native(pool, cd, state)
+        else:
+            _run_cycle_subprocess(container, cd, state)
+
+        with counter_lock:
+            counter[0] += 1
+
+
+def run_postgres_generation(
+    users: list[UserRecord],
+    products: list[ProductRecord],
+    state: GeneratorState,
+    args: argparse.Namespace,
+) -> None:
+    # Number of workers = min(rate, MAX_PG_WORKERS)
+    # Each worker runs a tight loop; rate throttling is handled via a token bucket
+    # across all workers so total cycles/s ≈ args.rate.
+    n_workers = min(args.rate, MAX_PG_WORKERS)
+    stop_event = threading.Event()
+    counter: list[int] = [0]
+    counter_lock = threading.Lock()
+
+    workers = []
+    for _ in range(n_workers):
+        t = threading.Thread(
+            target=_pg_worker,
+            args=(
+                stop_event,
+                users,
+                products,
+                state,
+                args.postgres_container,
+                args.pg_dsn,
+                args.summary_only,
+                counter,
+                counter_lock,
+            ),
+            daemon=True,
+        )
+        t.start()
+        workers.append(t)
+
+    started_at = time.monotonic()
+    last_report = started_at
+    last_count = 0
+
+    while time.monotonic() - started_at < args.duration:
+        time.sleep(1.0)
+        now = time.monotonic()
+        elapsed = now - last_report
+        with counter_lock:
+            current = counter[0]
+        delta = current - last_count
+        rate_actual = delta / elapsed if elapsed > 0 else 0
+        print(
+            f"[postgres] {int(now - started_at)}s elapsed | "
+            f"{current} cycles total | {rate_actual:.0f} cycles/s | "
+            f"~{int(current * 0.75)} orders",
+            file=sys.stderr,
+        )
+        last_report = now
+        last_count = current
+
+    stop_event.set()
+    for t in workers:
+        t.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Kafka generation loop
 # ---------------------------------------------------------------------------
 
 
@@ -1028,15 +1294,14 @@ def make_request_log_payload(
     users: list[UserRecord],
     error_rate: float,
 ) -> dict[str, Any]:
-    user = choose_user(users, state)
+    user = state.next_user(users)
     method, endpoint = random.choices(REQUEST_ENDPOINTS, weights=ENDPOINT_WEIGHTS)[0]
-    state.next_request_log_id += 1
+    rid = state.next_request_id()
 
     server_error_rate = max(0.0, min(error_rate, 0.4))
     client_error_rate = max(0.0, min(error_rate / 2.0, 0.2))
     success_rate = max(0.0, 1.0 - server_error_rate - client_error_rate)
     roll = random.random()
-
     is_error = roll >= success_rate
     if roll < success_rate:
         status_code = 200
@@ -1045,21 +1310,19 @@ def make_request_log_payload(
     else:
         status_code = random.choice([500, 502, 503, 504])
 
-    latency = realistic_latency_ms(error=is_error)
-    created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-
+    session_id = state.active_sessions.get(user.id)
     return {
-        "id": state.next_request_log_id,
+        "id": rid,
         "endpoint": endpoint,
         "method": method,
         "status_code": status_code,
-        "latency_ms": latency,
+        "latency_ms": realistic_latency_ms(error=is_error),
         "user_id": user.id,
-        "session_id": state.active_sessions.get(user.id),
+        "session_id": session_id,
         "region_name": user.region_name,
         "user_display_name": user.display_name,
         "platform": user.platform,
-        "created_at": created_at,
+        "created_at": int(datetime.now(timezone.utc).timestamp() * 1000),
     }
 
 
@@ -1073,14 +1336,13 @@ def make_system_metric_payload(state: GeneratorState) -> list[dict[str, Any]]:
             ("disk_io_mbps", 25, 8),
             ("network_in_mbps", 120, 30),
         ):
-            # Only emit cpu/memory always; others occasionally
             if metric_name not in ("cpu_percent", "memory_percent") and random.random() < 0.5:
                 continue
-            state.next_system_metric_id += 1
+            mid = state.next_metric_id()
             metric_value = max(0.0, min(100.0, random.gauss(mean, stddev)))
             payloads.append(
                 {
-                    "id": state.next_system_metric_id,
+                    "id": mid,
                     "node_name": node,
                     "metric_name": metric_name,
                     "metric_value": round(metric_value, 2),
@@ -1088,11 +1350,6 @@ def make_system_metric_payload(state: GeneratorState) -> list[dict[str, Any]]:
                 }
             )
     return payloads
-
-
-# ---------------------------------------------------------------------------
-# Generation loops
-# ---------------------------------------------------------------------------
 
 
 def run_kafka_generation(
@@ -1107,10 +1364,8 @@ def run_kafka_generation(
     while time.monotonic() - started_at < args.duration:
         second_start = time.monotonic()
         request_records: list[dict[str, Any]] = []
-
         for _ in range(effective_rate):
-            payload = make_request_log_payload(state, users, args.error_rate)
-            request_records.append(payload)
+            request_records.append(make_request_log_payload(state, users, args.error_rate))
 
         if args.summary_only:
             for r in request_records:
@@ -1142,23 +1397,6 @@ def run_kafka_generation(
             time.sleep(1.0 - elapsed)
 
 
-def run_postgres_generation(
-    users: list[UserRecord],
-    products: list[ProductRecord],
-    state: GeneratorState,
-    args: argparse.Namespace,
-) -> None:
-    started_at = time.monotonic()
-    while time.monotonic() - started_at < args.duration:
-        for _ in range(size_multiplier(args.size)):
-            generate_postgres_cycle(
-                args.postgres_container, users, products, state, args.summary_only
-            )
-            if time.monotonic() - started_at >= args.duration:
-                break
-        time.sleep(min(1.0, 60.0 / max(args.rate, 1)))
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1169,9 +1407,23 @@ def main() -> int:
 
     if not _HAS_FAKER:
         print(
-            "WARNING: 'faker' package not installed — using minimal synthetic data. "
-            "Install with: pip install faker",
+            "WARNING: 'faker' not installed — using minimal synthetic data. pip install faker",
             file=sys.stderr,
+        )
+
+    if not _HAS_PSYCOPG2:
+        print(
+            "WARNING: 'psycopg2' not installed — falling back to docker exec psql (slow). "
+            "pip install psycopg2-binary",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[postgres] using native psycopg2 connection ({args.pg_dsn[:40]}...)", file=sys.stderr
+        )
+        n_workers = min(args.rate, MAX_PG_WORKERS)
+        print(
+            f"[postgres] spawning {n_workers} worker threads for rate={args.rate}", file=sys.stderr
         )
 
     if args.summary_only and not args.users:
@@ -1203,19 +1455,15 @@ def main() -> int:
             return 1
 
     if args.mode == "all":
-        postgres_thread = threading.Thread(
-            target=run_postgres_generation,
-            args=(users, products, state, args),
-            daemon=False,
+        pg_thread = threading.Thread(
+            target=run_postgres_generation, args=(users, products, state, args), daemon=False
         )
         kafka_thread = threading.Thread(
-            target=run_kafka_generation,
-            args=(users, state, args),
-            daemon=False,
+            target=run_kafka_generation, args=(users, state, args), daemon=False
         )
-        postgres_thread.start()
+        pg_thread.start()
         kafka_thread.start()
-        postgres_thread.join()
+        pg_thread.join()
         kafka_thread.join()
     elif args.mode == "postgres":
         run_postgres_generation(users, products, state, args)
@@ -1231,11 +1479,12 @@ def main() -> int:
                 "rate": args.rate,
                 "effectiveRate": args.rate * size_multiplier(args.size),
                 "size": args.size,
-                "sizeMultiplier": size_multiplier(args.size),
                 "errorRate": args.error_rate,
+                "pg_workers": min(args.rate, MAX_PG_WORKERS),
+                "psycopg2": _HAS_PSYCOPG2,
+                "faker": _HAS_FAKER,
                 "postgres_users": len(users),
                 "products": len(products),
-                "faker_enabled": _HAS_FAKER,
             }
         )
     )

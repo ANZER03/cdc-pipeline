@@ -92,8 +92,8 @@ generate-kafka:  ## Generate Kafka-only traffic. Supports RATE=, DURATION=, PRES
 generate-postgres:  ## Generate PostgreSQL/CDC-only traffic. Supports RATE=, DURATION=, PRESET=, ERROR_RATE=
 	python3 scripts/generate_test_data.py --mode postgres --rate $(RATE) --duration $(DURATION) --preset $(PRESET) --error-rate $(ERROR_RATE)
 
-generate-stress:  ## Stress test at 200 req/s for 3 minutes
-	python3 scripts/generate_test_data.py --mode all --preset extreme --rate 200 --duration 180 --size large
+generate-stress:  ## Stress test at 1000 cycles/s (32 workers) for 3 minutes
+	python3 scripts/generate_test_data.py --mode all --preset extreme
 
 generate-light:  ## Light traffic for quick smoke tests (5 req/s, 2 min)
 	python3 scripts/generate_test_data.py --mode all --preset light
