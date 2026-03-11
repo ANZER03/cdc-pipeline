@@ -9,7 +9,7 @@ To start only the services required for this ingestion demo (PostgreSQL, Kafka, 
 ```bash
 docker compose up -d \
   postgres \
-  kafka \
+  kafka-1 \
   kafka-2 \
   kafka-init \
   schema-registry \
@@ -34,7 +34,7 @@ Ensure all services are running:
 docker compose ps
 ```
 
-You should see `postgres`, `kafka`, `debezium-connect`, and `kafka-ui` in a healthy state.
+You should see `nexus-postgres`, `nexus-kafka-1`, `debezium-connect`, and `kafka-ui` in a healthy state.
 
 ## 3. Verify Setup
 
@@ -43,13 +43,13 @@ You should see `postgres`, `kafka`, `debezium-connect`, and `kafka-ui` in a heal
 Verify that the Debezium connector is registered and running:
 
 ```bash
-curl -s http://localhost:8083/connectors/ebap-postgres-cdc/status | jq
+curl -s http://localhost:8083/connectors/nexus-postgres-cdc/status | jq
 ```
 
 Expected output:
 ```json
 {
-  "name": "ebap-postgres-cdc",
+  "name": "nexus-postgres-cdc",
   "connector": {
     "state": "RUNNING",
     "worker_id": "..."
@@ -67,37 +67,37 @@ Expected output:
 
 ### Check Kafka Topics
 
-List the topics to ensure the CDC topic exists:
+List the topics to ensure the CDC topics exist:
 
 ```bash
-docker exec -it ebap-kafka kafka-topics --bootstrap-server kafka:9092 --list
+docker exec -it nexus-kafka-1 kafka-topics --bootstrap-server localhost:9092 --list
 ```
 
-You should see `ebap.cdc.users`.
+You should see topics like `pg.public.users`, `pg.public.orders`, `pg.public.sessions`, etc.
 
 ## 4. Database Operations (PostgreSQL)
 
 You can connect to the PostgreSQL database using the `docker exec` command:
 
 ```bash
-docker exec -it ebap-postgres psql -U admin -d ebap_db
+docker exec -it nexus-postgres psql -U admin -d nexus_db
 ```
 
-Once inside the SQL prompt (`ebap_db=#`), you can run the following commands.
+Once inside the SQL prompt (`nexus_db=#`), you can run the following commands.
 
 ### A. Insert a New User
 
 ```sql
-INSERT INTO users (user_id, username, email, tier, region)
-VALUES ('usr_999', 'demo_user', 'demo@example.com', 'free', 'us-east-1');
+INSERT INTO users (username, display_name, email, country_code, city, region_name, platform)
+VALUES ('demo_user', 'Demo User', 'demo@example.com', 'US', 'New York', 'North America (East)', 'Desktop');
 ```
 
 ### B. Update an Existing User
 
-Update the `tier` for the user we just created:
+Update the `platform` for the user we just created:
 
 ```sql
-UPDATE users SET tier = 'premium' WHERE user_id = 'usr_999';
+UPDATE users SET platform = 'Mobile' WHERE username = 'demo_user';
 ```
 
 ### C. Delete a User
@@ -105,7 +105,7 @@ UPDATE users SET tier = 'premium' WHERE user_id = 'usr_999';
 Delete the user:
 
 ```sql
-DELETE FROM users WHERE user_id = 'usr_999';
+DELETE FROM users WHERE username = 'demo_user';
 ```
 
 ### D. Verify Data
@@ -113,7 +113,7 @@ DELETE FROM users WHERE user_id = 'usr_999';
 To see the current data in the table:
 
 ```sql
-SELECT * FROM users ORDER BY id DESC LIMIT 5;
+SELECT id, username, display_name, country_code, region_name, platform FROM users ORDER BY id DESC LIMIT 5;
 ```
 
 Exit the SQL prompt with `\q`.
@@ -127,9 +127,9 @@ You can observe the CDC events in real-time using the Kafka Console Consumer or 
 Open a new terminal and run:
 
 ```bash
-docker exec -it ebap-kafka kafka-console-consumer \
-  --bootstrap-server kafka:9092 \
-  --topic ebap.cdc.users \
+docker exec -it nexus-kafka-1 kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic pg.public.users \
   --from-beginning
 ```
 
@@ -142,7 +142,7 @@ docker exec -it ebap-kafka kafka-console-consumer \
 ### Option 2: Kafka UI
 
 1. Open your browser and go to [http://localhost:8084](http://localhost:8084).
-2. Navigate to **Topics** -> **ebap.cdc.users**.
+2. Navigate to **Topics** -> **pg.public.users**.
 3. Click on the **Messages** tab.
 4. You will see the live stream of messages as you perform operations in the database.
 
@@ -150,28 +150,30 @@ docker exec -it ebap-kafka kafka-console-consumer \
 
 ## 6. Message Structure Example
 
-A typical Debezium CDC message looks like this (simplified):
+A typical Debezium CDC message looks like this (simplified, before `ExtractNewRecordState` unwrap):
 
 ```json
 {
   "before": null,
   "after": {
     "id": 11,
-    "user_id": "usr_999",
     "username": "demo_user",
+    "display_name": "Demo User",
     "email": "demo@example.com",
-    "tier": "free",
-    "region": "us-east-1",
+    "country_code": "US",
+    "city": "New York",
+    "region_name": "North America (East)",
+    "platform": "Desktop",
     "created_at": 1715629400000,
     "updated_at": 1715629400000
   },
   "source": {
     "version": "2.3.0.Final",
     "connector": "postgresql",
-    "name": "ebap.cdc",
+    "name": "nexus-postgres-cdc",
     "ts_ms": 1715629400123,
     "snapshot": "false",
-    "db": "ebap_db",
+    "db": "nexus_db",
     "sequence": "...",
     "schema": "public",
     "table": "users",

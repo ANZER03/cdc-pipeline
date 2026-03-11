@@ -1,6 +1,6 @@
 # Nexus Dashboard -- Full Application Description
 
-> **Purpose of this document**: Serve as the single source of truth for the Nexus Dashboard application -- what it displays, what data it consumes, and the exact schemas/contracts the upstream data pipeline (PostgreSQL > Debezium CDC > Kafka > Schema Registry > Spark Streaming > Redis) must produce to replace the current simulated data.
+> **Purpose of this document**: Serve as the single source of truth for the Nexus Dashboard application -- what it displays, what data it consumes, and the exact schemas/contracts produced by the upstream data pipeline (PostgreSQL > Debezium CDC > Kafka > Schema Registry > Spark Streaming > Redis).
 
 ---
 
@@ -9,7 +9,7 @@
 1. [Project Overview](#1-project-overview)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Dashboard Tabs & Features](#3-dashboard-tabs--features)
-4. [Current Data Schemas (Simulation)](#4-current-data-schemas-simulation)
+4. [Data Schemas](#4-data-schemas)
 5. [Target Data Contracts (Pipeline Output)](#5-target-data-contracts-pipeline-output)
 6. [PostgreSQL Source Tables](#6-postgresql-source-tables)
 7. [Kafka Topics & Schema Registry](#7-kafka-topics--schema-registry)
@@ -45,81 +45,70 @@ Nexus Dashboard is a real-time e-commerce operations monitoring application. It 
 | Icons | Lucide React |
 | Package Delivery | ESM via import maps (esm.sh CDN) |
 
-### Current State vs. Target State
+### Implemented Architecture
 
-| Aspect | Current (Simulated) | Target (Real Pipeline) |
-|--------|---------------------|----------------------|
-| Data source | `services/dataSimulator.ts` generates random data in-browser | PostgreSQL transactional DB + event log |
-| Data transport | None -- all in-memory | Debezium CDC > Kafka > Spark Streaming > Redis |
-| Dashboard reads from | React state populated by `setInterval` timers | FastAPI backend (SSE push + REST snapshots) backed by Redis |
-| Freshness | 2-4 second in-browser intervals | 10-30 second micro-batch windows (Spark), pushed instantly via SSE |
-| Alert evaluation | Static hardcoded rules | Spark evaluates thresholds, writes results to Redis, SSE pushes to frontend |
+The Nexus Dashboard is fully connected to a live CDC pipeline. All data displayed in the UI originates from real pipeline computations — no simulation, no hardcoded values, no in-browser data generation.
+
+| Aspect | Implementation |
+|--------|---------------|
+| Data source | PostgreSQL transactional DB + event log |
+| Data transport | Debezium CDC > Kafka > Spark Streaming > Redis |
+| Dashboard reads from | FastAPI backend (WebSocket push + REST snapshots) backed by Redis |
+| Freshness | 30-second Spark micro-batch windows, pushed immediately via WebSocket |
+| Alert evaluation | Spark evaluates thresholds, writes results to Redis, WebSocket pushes to frontend |
 
 ---
 
 ## 2. Architecture Overview
 
-### Current Architecture (Simulated)
-
-```
-+---------------------+
-|   Browser (React)   |
-|                     |
-|  dataSimulator.ts   |  Generates fake data every 2-4s
-|        |            |
-|  React State        |  KPIs, traffic, activities, regions, alerts
-|        |            |
-|  Dashboard UI       |  Renders charts, globe, KPIs, tables
-+---------------------+
-```
-
-### Target Architecture (Real Pipeline)
+### Current Architecture
 
 ```
 +------------------+     +----------+     +------------------+     +-----------------+
 |   PostgreSQL     |---->| Debezium |---->|      Kafka       |---->| Spark Streaming |
 |                  |     |   CDC    |     | (Schema Registry)|     |                 |
 | - orders         |     +----------+     |                  |     | - Aggregations  |
-| - cart_items     |                      | Raw CDC Topics:  |     | - Windowed KPIs |
-| - users          |                      | - pg.orders      |     | - Geo rollups   |
-| - products       |                      | - pg.cart_items   |     | - Alert eval    |
-| - user_events    |                      | - pg.user_events  |     |                 |
-| - sessions       |                      | - pg.sessions     |     +--------+--------+
-+------------------+                      |                  |              |
-                                          | Enriched Topics: |              v
-                                          | - enriched.      |     +------------------+
-                                          |   activities     |     |      Redis       |
-                                          +------------------+     |                  |
+| - cart_items     |                      | CDC Topics:      |     | - Windowed KPIs |
+| - users          |                      | - pg.public.*    |     | - Geo rollups   |
+| - products       |                      |                  |     | - Alert eval    |
+| - user_events    |                      | Direct Topics:   |     |                 |
+| - sessions       |                      | - raw.request_log|     +--------+--------+
++------------------+                      | - raw.system_    |              |
+                                          |   metrics        |              v
+                                          +------------------+     +------------------+
+                                                                   |      Redis       |
+                                                                   |                  |
                                                                    | - KPI hashes     |
                                                                    | - Traffic TS     |
                                                                    | - Activity lists |
                                                                    | - Region hashes  |
-                                                                    | - Alert states   |
-                                                                    | - Health metrics |
-                                                                    +--------+---------+
-                                                                             |
-                                                                             v
-                                                                    +------------------+
-                                                                    |  Dashboard API   |
-                                                                    | (FastAPI + SSE)  |
-                                                                    |                  |
-                                                                    | - Subscribes to  |
-                                                                    |   Redis pub/sub  |
-                                                                    | - Fans out SSE   |
-                                                                    |   to all clients |
-                                                                    | - REST snapshots |
-                                                                    |   for initial    |
-                                                                    |   page load      |
-                                                                    +--------+---------+
-                                                                             |
-                                                                             v
-                                                                    +------------------+
-                                                                    | Nexus Dashboard  |
-                                                                    | (React Frontend) |
-                                                                    |                  |
-                                                                    | EventSource SSE  |
-                                                                    | + REST on load   |
-                                                                    +------------------+
+                                                                   | - Alert states   |
+                                                                   | - Health metrics |
+                                                                   +--------+---------+
+                                                                            |
+                                                                            v
+                                                                   +------------------+
+                                                                   |  Dashboard API   |
+                                                                   | (FastAPI + WS)   |
+                                                                   |                  |
+                                                                   | - Subscribes to  |
+                                                                   |   Redis pub/sub  |
+                                                                   | - Fans out WS    |
+                                                                   |   to all clients |
+                                                                   | - REST snapshots |
+                                                                   |   for initial    |
+                                                                   |   page load      |
+                                                                   +--------+---------+
+                                                                            |
+                                                                            v
+                                                                   +------------------+
+                                                                   | Nexus Dashboard  |
+                                                                   | (React Frontend) |
+                                                                   |                  |
+                                                                   | WebSocket client |
+                                                                   | ws://localhost:  |
+                                                                   | 8000/ws          |
+                                                                   +------------------+
 ```
 
 ### Data Flow Summary
@@ -129,8 +118,8 @@ Nexus Dashboard is a real-time e-commerce operations monitoring application. It 
 3. **Kafka + Schema Registry** transports events with enforced Avro schemas
 4. **Spark Streaming** consumes Kafka topics in micro-batch windows (10-30s), computes aggregations (KPIs, regional rollups, traffic time-series, alert evaluations), and writes results to Redis
 5. **Redis** serves as the low-latency read layer for the dashboard
-6. **Dashboard API** (FastAPI + aioredis) subscribes to Redis Pub/Sub channels and fans out updates to React clients via **Server-Sent Events (SSE)**. It also exposes REST snapshot endpoints for initial page load.
-7. **React Dashboard** connects to the SSE stream on mount, fetches a REST snapshot first to avoid blank state, then applies incremental updates from SSE events -- no simulation, no in-browser computation
+6. **Dashboard API** (FastAPI + aioredis) subscribes to Redis Pub/Sub channels and fans out updates to React clients via **WebSocket** (`ws://localhost:8000/ws`). It also exposes REST snapshot endpoints for initial page load.
+7. **React Dashboard** connects to the WebSocket on mount via `NexusWsClient` (`services/wsClient.ts`). On connect, the API sends a full snapshot of all 9 data types immediately. Subsequent incremental updates are pushed as Redis pub/sub fires. All state is managed in `hooks/useNexusData.tsx` via the `NexusDataProvider` context -- no simulation, no in-browser computation.
 
 ---
 
@@ -160,7 +149,7 @@ Each KPI card shows:
 - An optional unit suffix
 - A trend indicator: up arrow (green) or down arrow (red) with percentage and "vs last hour"
 
-**NOTE**: Trend values are currently hardcoded. The pipeline should compute actual hour-over-hour deltas.
+Trend values are computed as hour-over-hour deltas from the pipeline (`*Trend` fields in `nexus:kpi:current`).
 
 #### Section B: Traffic Throughput (AreaChart)
 
@@ -169,8 +158,7 @@ Each KPI card shows:
 - **X-axis**: Timestamp labels (HH:MM:SS format)
 - **Y-axis**: Request throughput value (numeric, auto-scaled)
 - **Visual**: Indigo (#5e5ce6) stroke with gradient fill, dashed grid lines
-- **Update frequency**: Currently every 2 seconds (new point appended, oldest removed)
-- **Target update**: Every Spark micro-batch window (10-30s)
+- **Update frequency**: Every Spark micro-batch window (30s)
 
 #### Section C: Regional Distribution (3D Globe)
 
@@ -190,19 +178,19 @@ Each KPI card shows:
 - **Per event**: User name, action type, location, amount (for purchases), timestamp
 - **Action types**: `purchase`, `view`, `cart`, `login`
 - **Color coding**: Green dot = purchase, Yellow dot = cart, Blue dot = view/login
-- **Update frequency**: Currently ~60% chance every 2 seconds
+- **Update frequency**: Pushed via WebSocket as events arrive from Redis pub/sub
 
 #### Section E: Device Platform (PieChart)
 
 - **Type**: Recharts donut PieChart
 - **Data**: 4 segments -- Desktop, Mobile, iOS, Android
-- **Currently hardcoded**. The pipeline should compute real device/platform breakdowns.
+- **Source**: `nexus:platform:breakdown` Redis key, computed by the `nexus-derived` Spark job from `pg.public.sessions`.
 
 #### Section F: Health Check
 
 - **Type**: 3 horizontal progress bars
 - **Metrics**: CPU Utilization, Memory Load, API Cluster status
-- **Currently hardcoded**. The pipeline should source from infrastructure monitoring.
+- **Source**: `nexus:health:current` Redis key, computed by the `nexus-infrastructure` Spark job from `raw.system_metrics`.
 
 ### 3.2 Geo Monitor Tab
 
@@ -224,13 +212,11 @@ A full-screen command center view with 3 panels:
 - Per entry: location, timestamp, user, action type
 - Timeline-style layout with left border markers
 
-#### Header Bar (Static Metrics)
-- Uptime: 99.999%
-- Global Load: 4.2 PB/S
-- Engine Version: V4-Orbit
-- Protocol Status: Secure
-
-**NOTE**: Header metrics are currently hardcoded. The pipeline should compute uptime from health checks and global load from traffic aggregation.
+#### Header Bar
+- Uptime: sourced from `nexus:geo:header` (`uptime` field)
+- Global Load: sourced from `nexus:geo:header` (`globalLoad` field)
+- Engine Version: V4-Orbit (static label)
+- Protocol Status: Secure (static label)
 
 ### 3.3 Alerting Tab
 
@@ -264,9 +250,9 @@ Placeholder for future advanced analytics / ad-hoc query builder. Currently show
 
 ---
 
-## 4. Current Data Schemas (Simulation)
+## 4. Data Schemas
 
-All data is currently generated client-side by `services/dataSimulator.ts`. This section documents every schema and hardcoded value that the pipeline must replace.
+All data is consumed from the live pipeline. This section documents every schema and value shape used by the dashboard.
 
 ### 4.1 TypeScript Interfaces
 
@@ -346,83 +332,52 @@ interface AlertRule {
 }
 ```
 
-### 4.2 Hardcoded Region Definitions
+### 4.2 Region Definitions
 
-The 9 geographic regions that represent global e-commerce nodes:
+The 9 geographic regions that represent global e-commerce nodes. Coordinates are fixed; `intensity` and `sales` are computed by the `nexus-transactions` Spark job each window:
 
-| # | Name | Longitude | Latitude | Base Intensity | Base Sales ($) |
-|---|------|-----------|----------|---------------|----------------|
-| 1 | North America (East) | -74 | 40 | 85 | 12,400 |
-| 2 | North America (West) | -122 | 37 | 75 | 9,800 |
-| 3 | Western Europe | 2 | 48 | 92 | 15,200 |
-| 4 | Japan | 139 | 35 | 95 | 18,500 |
-| 5 | Southeast Asia | 103 | 1 | 65 | 5,400 |
-| 6 | Australia | 151 | -33 | 45 | 3,200 |
-| 7 | Brazil | -46 | -23 | 30 | 2,100 |
-| 8 | India | 77 | 28 | 88 | 11,000 |
-| 9 | South Africa | 18 | -33 | 25 | 1,500 |
+| # | Name | Longitude | Latitude |
+|---|------|-----------|----------|
+| 1 | North America (East) | -74 | 40 |
+| 2 | North America (West) | -122 | 37 |
+| 3 | Western Europe | 2 | 48 |
+| 4 | Japan | 139 | 35 |
+| 5 | Southeast Asia | 103 | 1 |
+| 6 | Australia | 151 | -33 |
+| 7 | Brazil | -46 | -23 |
+| 8 | India | 77 | 28 |
+| 9 | South Africa | 18 | -33 |
 
-**Simulation jitter**:
-- Intensity: `original +/- 5`, clamped to `[10, 100]`
-- Sales: `original +/- 250`, floored at `500`
+### 4.3 Activity Event Types
 
-### 4.3 Hardcoded Activity Values
+| `user_events.event_type` | Dashboard `action` | Notes |
+|---|---|---|
+| `checkout_complete` | `purchase` | Amount from enriched order field |
+| `page_view` | `view` | -- |
+| `add_to_cart` | `cart` | -- |
+| `login` | `login` | -- |
 
-| Field | Possible Values |
-|-------|----------------|
-| Users | Alex, Jordan, Casey, Sasha, Taylor, Jamie, Morgan |
-| Actions | purchase, view, cart, login |
-| Locations | New York US, London UK, Tokyo JP, Berlin DE, Sydney AU, Paris FR |
-| Purchase amounts | Random integer $20 - $519 |
+### 4.4 Alert Rules
 
-### 4.4 Hardcoded Alert Rules
+Alert rules are evaluated by the `nexus-transactions` Spark job and stored in `nexus:alert:rules`. The current rules evaluate latency, error rate, and CPU thresholds.
 
-| ID | Rule Name | Status | Severity | Metric | Current | Threshold | Frequency |
-|----|-----------|--------|----------|--------|---------|-----------|-----------|
-| 1 | High Latency p99 > 200ms | firing | critical | system.latency.p99 | 245 | 200 | 1m |
-| 2 | Checkout Error Rate > 1% | ok | critical | checkout.error_rate | 0.04 | 1.0 | 30s |
-| 3 | Database CPU Utilization | pending | warning | db.cpu.percent | 82 | 80 | 5m |
+### 4.5 Update Frequencies (Live Pipeline)
 
-### 4.5 Hardcoded Static Values
-
-These values are currently baked into the JSX and need pipeline sources:
-
-| Location | Value | Description |
-|----------|-------|-------------|
-| Dashboard > Device Platform | Desktop: 4500, Mobile: 3200, iOS: 2800, Android: 2100 | Device breakdown |
-| Dashboard > Health Check | CPU: 22.4%, Memory: 58%, API: 95% (HEALTHY) | Infrastructure health |
-| Dashboard > KPI Trends | +5.2%, +12.5%, -2.1%, +0.5%, -1.2% | Hour-over-hour deltas |
-| Geo Monitor > Header | Uptime: 99.999%, Global Load: 4.2 PB/S | System metrics |
-| Alerting > Summary | Critical: 1, Warnings: 1, Healthy: 3 | Alert counts (should be dynamic) |
-
-### 4.6 Update Intervals (Simulation Timers)
-
-| Timer | Location | Interval | Data Updated |
-|-------|----------|----------|--------------|
-| App main loop | App.tsx | 2,000ms | traffic (+1 point), activities (60% chance), all 5 KPI metrics |
-| Geo monitoring loop | GeoMonitoringView.tsx | 3,000ms | regions (jittered), activities (70% chance) |
-| WorldMap data loop | WorldMap.tsx | 4,000ms | region hotspots, data flow arcs (60% chance) |
-
-### 4.7 Simulation Logic (How Values Mutate)
-
-These describe how the simulation updates values each tick. The pipeline's Spark jobs should produce equivalent outputs:
-
-| Metric | Mutation Logic | Realistic Pipeline Equivalent |
-|--------|---------------|-------------------------------|
-| `activeUsers` | `prev + random(-25, +25)`, floored to int | Count distinct session IDs active in last N minutes |
-| `revenue` | `prev + random(0, 99)` with 30% probability | SUM of order amounts in current window |
-| `orders` | `prev + 1` with 20% probability | COUNT of completed orders in current window |
-| `errorRate` | `prev + random(-0.005, +0.005)`, min 0.01 | (failed_requests / total_requests) * 100 in window |
-| `latency` | `random(120, 139)` fresh each tick | AVG or P50/P99 of request durations in window |
-| `traffic.value` | `prev + random(-50, +50)`, min 800 | COUNT of requests per second, sampled per window |
-| `region.intensity` | `base + random(-5, +5)`, clamped [10, 100] | Normalized request count or session count per region |
-| `region.sales` | `base + random(-250, +250)`, min 500 | SUM of order amounts per region in window |
+| Data type | Spark trigger | WebSocket push frequency |
+|---|---|---|
+| KPI metrics | 30s | ~Every 30s |
+| Traffic chart | 30s (tumbling) | ~Every 30s (one new point) |
+| Activity feed | Per event | As events arrive |
+| Regions / flows | 30s | ~Every 30s |
+| Platform breakdown | 30s | ~Every 30s |
+| Health check | 30s | ~Every 30s |
+| Alerts | On state change | Infrequent |
 
 ---
 
-## 5. Target Data Contracts (Pipeline Output)
+## 5. Data Contracts (Pipeline Output)
 
-This section defines the exact data shapes the pipeline must produce and write to Redis for each dashboard component.
+This section defines the exact data shapes the pipeline produces and writes to Redis for each dashboard component.
 
 ### 5.1 KPI Metrics Contract
 
@@ -1537,9 +1492,9 @@ HSET nexus:geo:header
 
 **Dashboard reads**: `HGETALL nexus:geo:header`
 
-### 9.10 Redis Pub/Sub Channels (SSE Push Layer)
+### 9.10 Redis Pub/Sub Channels (WebSocket Push Layer)
 
-Redis Pub/Sub is the **primary real-time delivery mechanism**. It is not optional. Spark writes aggregated results to Redis keys (snapshots) and **immediately** publishes a notification to the corresponding pub/sub channel. The FastAPI backend subscribes to all channels and fans out each message to every connected SSE client.
+Redis Pub/Sub is the **primary real-time delivery mechanism**. It is not optional. Spark writes aggregated results to Redis keys (snapshots) and **immediately** publishes a notification to the corresponding pub/sub channel. The FastAPI backend subscribes to all channels and fans out each message to every connected WebSocket client via `ws://localhost:8000/ws`.
 
 #### 9.10.1 Two-Step Write Pattern (Spark Responsibility)
 
@@ -1550,7 +1505,7 @@ Step 1: Write result to Redis snapshot key   (for REST initial-load reads)
 Step 2: PUBLISH result to pub/sub channel    (triggers SSE push to frontend)
 ```
 
-**Critical**: These are two separate Redis operations. Pub/Sub has no persistence — if the backend is not subscribed at the moment of publish, the message is lost. The snapshot keys in steps 9.1–9.9 are the durability layer; pub/sub is the push notification layer.
+**Critical**: These are two separate Redis operations. Pub/Sub has no persistence — if the backend is not subscribed at the moment of publish, the message is lost. The snapshot keys in steps 9.1–9.9 are the durability layer; pub/sub is the WebSocket push notification layer.
 
 Example (PySpark + redis-py):
 
@@ -1566,7 +1521,7 @@ r.hset("nexus:kpi:current", mapping=kpi_dict)
 r.publish("nexus.kpi", json.dumps(kpi_dict))
 ```
 
-Do NOT publish without also writing to the snapshot key. The REST snapshot endpoints (used on initial page load and SSE reconnect) read only from the keys, never from pub/sub.
+Do NOT publish without also writing to the snapshot key. The REST snapshot endpoints (used for initial WebSocket snapshot-on-connect and REST API calls) read only from the keys, never from pub/sub.
 
 #### 9.10.2 Channel Definitions
 
@@ -1663,85 +1618,47 @@ These are the exact JSON strings Spark must pass to `PUBLISH`. The shapes match 
 { "uptime": 99.999, "globalLoad": "4.2 PB/S", "globalLoadBytes": 4200000000000000, "engineVersion": "V4-Orbit", "protocolStatus": "Secure", "updatedAt": 1709654400000 }
 ```
 
-#### 9.10.4 SSE Event Types (FastAPI → Frontend)
+#### 9.10.4 WebSocket Message Types (FastAPI → Frontend)
 
-The FastAPI backend converts each pub/sub message into a named SSE event. The frontend uses `EventSource.addEventListener(type, handler)` to listen for each type.
+The FastAPI backend converts each pub/sub message into a WebSocket JSON frame and sends it to all connected clients via `ws://localhost:8000/ws`. The frontend (`NexusWsClient` in `services/wsClient.ts`) dispatches on the `type` field.
 
-| Pub/Sub Channel | SSE `event:` type | Frontend listener |
-|----------------|------------------|------------------|
-| `nexus.kpi` | `metrics` | `source.addEventListener('metrics', ...)` |
-| `nexus.traffic` | `traffic` | `source.addEventListener('traffic', ...)` |
-| `nexus.activity` | `activity` | `source.addEventListener('activity', ...)` |
-| `nexus.regions` | `regions` | `source.addEventListener('regions', ...)` |
-| `nexus.flows` | `flows` | `source.addEventListener('flows', ...)` |
-| `nexus.alerts` | `alert` | `source.addEventListener('alert', ...)` |
-| `nexus.platform` | `platform` | `source.addEventListener('platform', ...)` |
-| `nexus.health` | `health` | `source.addEventListener('health', ...)` |
-| `nexus.geo` | `geo` | `source.addEventListener('geo', ...)` |
+| Pub/Sub Channel | WS `type` field | Frontend handler |
+|----------------|----------------|-----------------|
+| `nexus.kpi` | `metrics` | Updates all 5 KPI cards and trends |
+| `nexus.traffic` | `traffic` | Appends to chart, drops oldest (21-point window) |
+| `nexus.activity` | `activity` | Prepends to feed, drops oldest (10/15 items) |
+| `nexus.regions` | `regions` | Re-renders globe hotspots and node cards |
+| `nexus.flows` | `flows` | Re-renders globe arc lines |
+| `nexus.alerts` | `alert` | Updates alert table and summary counts |
+| `nexus.platform` | `platform` | Re-renders device platform pie chart |
+| `nexus.health` | `health` | Updates health check bars |
+| `nexus.geo` | `geo` | Updates Geo Monitor header metrics |
 
-SSE wire format (FastAPI must emit exactly this):
+WebSocket message wire format (each message is a single JSON string):
 
-```
-event: metrics
-data: {"activeUsers":14502,"revenue":42500,...}
-
-event: activity
-data: {"id":"evt_abc123","user":"Alex","action":"purchase",...}
-
+```json
+{"type": "metrics", "data": {"activeUsers":14502,"revenue":42500,...}}
+{"type": "activity", "data": {"id":"evt_abc123","user":"Alex","action":"purchase",...}}
 ```
 
-Each event is terminated by a blank line (`\n\n`). The `data:` field is always a single-line JSON string (no pretty-printing).
+On connect, the API immediately sends a full snapshot message for all 9 types before switching to incremental pub/sub pushes.
 
-#### 9.10.5 SSE Keepalive / Heartbeat
+#### 9.10.5 WebSocket Reconnect and State Resync
 
-SSE connections are long-lived HTTP responses. Proxies (nginx, AWS ALB) and mobile networks will silently close idle connections (nginx default timeout: 60s). The FastAPI backend MUST send a comment-only keepalive every **25 seconds** to prevent this:
+Redis Pub/Sub has **no message persistence**. If a client disconnects and reconnects, all messages published during the gap are permanently lost. The WebSocket snapshot-on-connect behavior handles this automatically.
 
-```
-: keep-alive
+**Reconnect behavior** (implemented in `NexusWsClient`):
 
-```
-
-A line starting with `:` is an SSE comment — the browser ignores it but it keeps the TCP connection alive. The frontend `EventSource` requires no code changes to handle this.
-
-FastAPI implementation:
-
-```python
-async def event_generator():
-    while True:
-        # send keepalive if no real event in last 25s
-        yield ": keep-alive\n\n"
-        await asyncio.sleep(25)
-```
-
-#### 9.10.6 SSE Reconnect and State Resync
-
-Redis Pub/Sub has **no message persistence**. If a client disconnects (network drop, browser tab backgrounded) and reconnects, all messages published during the gap are permanently lost.
-
-**Required reconnect behavior**:
-
-1. Browser `EventSource` auto-reconnects after a disconnect (built-in behavior, ~3s default retry)
-2. On reconnect, the frontend MUST re-fetch all REST snapshot endpoints to resync current state before applying new SSE deltas
-3. The backend MUST NOT attempt to replay missed pub/sub messages
-
-The frontend reconnect flow:
-
-```
-EventSource 'error' event fired (connection lost)
-  → EventSource auto-reconnects (browser handles this)
-  → On 'open' event (reconnected):
-      → re-fetch GET /api/metrics
-      → re-fetch GET /api/regions
-      → re-fetch GET /api/activities
-      → re-fetch GET /api/alerts
-      → apply full state snapshots to React state
-      → resume applying incremental SSE deltas
-```
+1. WebSocket `onclose` or `onerror` fires
+2. `NexusWsClient` reconnects with exponential backoff (1s, 2s, 4s, 8s, up to ~30s max)
+3. On successful reconnect, the API automatically sends a full snapshot of all 9 data types
+4. No separate REST fetches needed — the WS snapshot-on-connect is the resync mechanism
 
 If stronger replay guarantees are needed in the future, replace Redis Pub/Sub with **Redis Streams** (XREAD with consumer groups) which supports message persistence and offset tracking.
 
-#### 9.10.7 REST Snapshot Endpoints (Initial Load + Reconnect)
+#### 9.10.6 REST Snapshot Endpoints
 
-The FastAPI backend MUST expose these endpoints. They read directly from Redis snapshot keys (no pub/sub) and return the current state for initial page load and reconnect resync.
+The FastAPI backend exposes these REST endpoints. They read directly from Redis snapshot keys (no pub/sub). Used by external clients and for testing; the dashboard itself uses the WebSocket snapshot-on-connect instead.
 
 | Method | Endpoint | Redis Command | Response |
 |--------|----------|---------------|----------|
@@ -1826,16 +1743,16 @@ This table maps every dashboard component to its complete data lineage: which Re
 
 ---
 
-## Appendix A: SSE Event Reference and REST Snapshot Endpoints
+## Appendix A: WebSocket Event Reference and REST Snapshot Endpoints
 
-The dashboard uses a push-based SSE architecture, not polling. This appendix summarises all SSE event types the frontend must handle, and the REST endpoints it must call on initial load and reconnect.
+The dashboard uses a push-based WebSocket architecture, not polling. This appendix summarises all WebSocket message types the frontend handles, and the REST endpoints available for external access.
 
-### A.1 SSE Event Types
+### A.1 WebSocket Message Types
 
-The frontend opens a single long-lived connection to `GET /events`. All real-time updates arrive as named SSE events on this connection.
+The frontend opens a single WebSocket connection to `ws://localhost:8000/ws` via `NexusWsClient`. All real-time updates arrive as JSON frames with a `type` field.
 
-| SSE `event:` type | Source channel | Payload shape | Frontend impact |
-|------------------|---------------|---------------|----------------|
+| WS `type` | Source channel | Payload shape | Frontend impact |
+|----------|---------------|---------------|----------------|
 | `metrics` | `nexus.kpi` | Full KPI object (10 fields + `updatedAt`) | Update all 5 KPI cards and trends |
 | `traffic` | `nexus.traffic` | Single `DataPoint` | Append to chart, drop oldest (maintain 21 points) |
 | `activity` | `nexus.activity` | Single `Activity` | Prepend to feed, drop oldest (maintain 10/15 items) |
@@ -1846,92 +1763,79 @@ The frontend opens a single long-lived connection to `GET /events`. All real-tim
 | `health` | `nexus.health` | Health object | Update health check bars |
 | `geo` | `nexus.geo` | Geo header object | Update Geo Monitor header metrics |
 
-SSE keepalive comments (`: keep-alive`) are sent every 25 seconds by the server. The browser ignores them — no frontend handling needed.
+On connect, the API sends all 9 message types immediately (snapshot-on-connect) before switching to incremental pub/sub pushes.
 
-### A.2 REST Snapshot Endpoints (Initial Load + Reconnect Resync)
+### A.2 REST Snapshot Endpoints
 
-Called once on page load (before SSE connection is opened) and again on every SSE reconnect to avoid stale state.
+Available for external clients and testing. The dashboard itself uses the WebSocket snapshot-on-connect instead of these REST calls.
 
-| Endpoint | Redis source | Response | Called by |
-|----------|-------------|----------|----------|
-| `GET /api/metrics` | `HGETALL nexus:kpi:current` | KPI JSON object | App.tsx on mount, on SSE reconnect |
-| `GET /api/traffic` | `LRANGE nexus:traffic:timeseries 0 20` (reversed) | Array[21] DataPoint, oldest-first | App.tsx on mount, on SSE reconnect |
-| `GET /api/activities` | `LRANGE nexus:activity:feed 0 14` | Array[15] Activity, newest-first | App.tsx on mount, on SSE reconnect |
-| `GET /api/regions` | `GET nexus:regions:current` | Array[9] RegionMetric | App.tsx on mount, on SSE reconnect |
-| `GET /api/flows` | `GET nexus:flows:current` | Array[≤5] DataFlow | App.tsx on mount, on SSE reconnect |
-| `GET /api/alerts` | `GET nexus:alert:rules` + `HGETALL nexus:alert:summary` | `{rules:[...], summary:{...}}` | AlertsView on mount, on SSE reconnect |
-| `GET /api/platform` | `GET nexus:platform:breakdown` | Array[4] platform | App.tsx on mount, on SSE reconnect |
-| `GET /api/health` | `HGETALL nexus:health:current` | Health JSON object | App.tsx on mount, on SSE reconnect |
-| `GET /api/geo` | `HGETALL nexus:geo:header` | Geo header JSON object | GeoMonitoringView on mount, on SSE reconnect |
+| Endpoint | Redis source | Response |
+|----------|-------------|----------|
+| `GET /api/metrics` | `HGETALL nexus:kpi:current` | KPI JSON object |
+| `GET /api/traffic` | `LRANGE nexus:traffic:timeseries 0 20` (reversed) | Array[21] DataPoint, oldest-first |
+| `GET /api/activities` | `LRANGE nexus:activity:feed 0 14` | Array[15] Activity, newest-first |
+| `GET /api/regions` | `GET nexus:regions:current` | Array[9] RegionMetric |
+| `GET /api/flows` | `GET nexus:flows:current` | Array[≤5] DataFlow |
+| `GET /api/alerts` | `GET nexus:alert:rules` + `HGETALL nexus:alert:summary` | `{rules:[...], summary:{...}}` |
+| `GET /api/platform` | `GET nexus:platform:breakdown` | Array[4] platform |
+| `GET /api/health` | `HGETALL nexus:health:current` | Health JSON object |
+| `GET /api/geo` | `HGETALL nexus:geo:header` | Geo header JSON object |
 
 ### A.3 Update Frequency Reference
 
-| Data type | Spark trigger | SSE push frequency | Frontend effect |
-|-----------|--------------|-------------------|----------------|
-| KPI metrics | Every 10s | ~Every 10s | KPI cards flicker if updated too fast — debounce at 5s minimum on frontend |
-| Traffic chart | Every 10s (tumbling) | ~Every 10s | One new point per event, 21-point rolling window |
+| Data type | Spark trigger | WS push frequency | Frontend effect |
+|-----------|--------------|------------------|----------------|
+| KPI metrics | Every 30s | ~Every 30s | KPI cards update each window |
+| Traffic chart | Every 30s (tumbling) | ~Every 30s | One new point per event, 21-point rolling window |
 | Activity feed | Per event (near real-time) | As events arrive | Individual event cards animate in |
-| Regions / flows | Every 15-30s | ~Every 15-30s | Globe re-renders smoothly (D3 handles transitions) |
+| Regions / flows | Every 30s | ~Every 30s | Globe re-renders smoothly (D3 handles transitions) |
 | Alerts | On state change only | Infrequent | Alert table refreshes only when a rule changes status |
-| Platform breakdown | Every 5min | ~Every 5min | Pie chart updates infrequently |
-| Health check | Every 15-30s | ~Every 15-30s | Progress bars update smoothly |
+| Platform breakdown | Every 30s | ~Every 30s | Pie chart updates each window |
+| Health check | Every 30s | ~Every 30s | Progress bars update smoothly |
 
 ---
 
-## Appendix B: Spark Micro-Batch Trigger Intervals (Recommended)
+## Appendix B: Spark Job Trigger Intervals (Implemented)
 
-| Spark Job | Trigger Interval | Window Size | Slide Interval |
-|-----------|-----------------|-------------|----------------|
-| `KpiAggregator` | 10s | 30s | 10s |
-| `TrafficTimeSeriesBuilder` | 10s | 10s (tumbling) | -- |
-| `ActivityEnricher` | 5s | -- (per-event) | -- |
-| `RegionAggregator` | 15s | 30s | 15s |
-| `DevicePlatformAggregator` | 30s | 5min (tumbling) | -- |
-| `AlertEvaluator` | 10s | -- (point-in-time) | -- |
-| `HealthCheckAggregator` | 15s | 30s | 15s |
-| `GeoHeaderAggregator` | 30s | 1min | 30s |
+All three Spark jobs run with a 30-second trigger interval:
 
----
+| Spark Job (container) | Trigger Interval | Primary outputs |
+|----------------------|-----------------|----------------|
+| `nexus-transactions` | 30s | KPIs, alerts, activity, regions, flows |
+| `nexus-infrastructure` | 30s | Traffic, health, geo |
+| `nexus-derived` | 30s | Platform breakdown |
 
-## Appendix C: What is NOT Yet Implemented in the Dashboard
-
-These features exist as placeholders or hardcoded values and need both pipeline AND frontend work:
-
-| Feature | Current State | Pipeline Needed | Frontend Needed |
-|---------|--------------|----------------|----------------|
-| **Explore tab** | Loading placeholder | Ad-hoc query engine (optional) | Full implementation |
-| **KPI trends** | Hardcoded percentages | Hourly snapshot comparison | Read from Redis instead of hardcoded |
-| **Device platform** | Hardcoded values | Session platform aggregation | Read from Redis instead of hardcoded |
-| **Health check** | Hardcoded values | System metrics aggregation | Read from Redis instead of hardcoded |
-| **Geo header metrics** | Hardcoded values | Uptime/load aggregation | Read from Redis instead of hardcoded |
-| **Alert summary counts** | Hardcoded values | Derive from alert rules | Compute dynamically from rules array |
-| **Alert evaluation** | Static rules | Real threshold evaluation | Read from Redis instead of static |
-| **Contact points** | Hardcoded UI | Notification config store | API-driven config |
-| **Sidebar: Inventory** | No-op button | N/A | Feature to build |
-| **Sidebar: Configuration** | No-op button | N/A | Feature to build |
-| **Search button** | No-op button | Search API | Feature to build |
-| **Time range picker** | "Last 1h" label, no-op | Historical query support | Feature to build |
-| **Activity timestamps** | Shows "just now" always | Real timestamps from pipeline | Display actual relative time |
-| **Geo search** | Search input exists, filters locally | N/A (client-side is fine) | Already works |
+Each job is submitted with `--total-executor-cores 6` (2 executors × 3 cores each). The two Spark workers auto-detect host resources (~10 cores, ~14.6 GiB each).
 
 ---
 
-## Appendix D: Frontend Integration Points
+## Appendix C: Remaining Placeholder Items
 
-When replacing the simulation with real data, these are the exact locations in the codebase to modify:
+The pipeline and core dashboard data flow are fully implemented. The following items remain as UI placeholders or future work:
 
-| File | Current Data Source | Replace With |
-|------|-------------------|--------------|
-| `App.tsx:48-74` | `setInterval` with random metrics | API call to fetch `nexus:kpi:current` every 10s |
-| `App.tsx:38` | `generateInitialHistory(20)` | API call to fetch `nexus:traffic:timeseries` |
-| `App.tsx:39` | Empty array, random activities | API call to fetch `nexus:activity:feed` |
-| `App.tsx:256-261` | Hardcoded pie chart data | API call to fetch `nexus:platform:breakdown` |
-| `App.tsx:278-306` | Hardcoded health values | API call to fetch `nexus:health:current` |
-| `App.tsx:173-203` | Hardcoded trend props | Read trends from KPI response |
-| `WorldMap.tsx:11` | `getUpdatedRegions()` | API call to fetch `nexus:regions:current` |
-| `WorldMap.tsx:190-198` | `setInterval` with `getUpdatedRegions` | API poll or WebSocket subscription |
-| `GeoMonitoringView.tsx:25` | `getUpdatedRegions()` | API call to fetch `nexus:regions:current` |
-| `GeoMonitoringView.tsx:30-37` | `setInterval` with random data | API poll or WebSocket subscription |
-| `GeoMonitoringView.tsx:68-81` | Hardcoded header metrics | API call to fetch `nexus:geo:header` |
-| `AlertsView.tsx:39` | `initialAlertRules` static import | API call to fetch `nexus:alert:rules` |
-| `AlertsView.tsx:77-101` | Hardcoded summary counts | API call to fetch `nexus:alert:summary` or compute from rules |
+| Feature | Current State | Notes |
+|---------|--------------|-------|
+| **Explore tab** | Loading placeholder | Ad-hoc query engine not yet built |
+| **Contact points** | Hardcoded UI | Slack/Email/PagerDuty listed statically |
+| **Sidebar: Inventory** | No-op button | Future feature |
+| **Sidebar: Configuration** | No-op button | Future feature |
+| **Search button** | No-op button | Future feature |
+| **Time range picker** | "Last 1h" label, no-op | Historical query support not yet built |
+
+---
+
+## Appendix D: Frontend Data Integration Points
+
+All dashboard data is consumed via the WebSocket connection managed by `NexusWsClient` (`services/wsClient.ts`) and distributed to components through the `NexusDataProvider` context in `hooks/useNexusData.tsx`.
+
+| Component / hook | Data consumed | Source |
+|-----------------|--------------|--------|
+| `hooks/useNexusData.tsx` | All 9 data types | WebSocket `NexusWsClient`, dispatches on `type` field |
+| KPI cards | `metrics` WS message | `nexus:kpi:current` via WS snapshot + incremental |
+| Traffic chart | `traffic` WS message | `nexus:traffic:timeseries` via WS snapshot + incremental |
+| Activity feed | `activity` WS message | `nexus:activity:feed` via WS snapshot + incremental |
+| Globe / region cards | `regions`, `flows` WS messages | `nexus:regions:current`, `nexus:flows:current` |
+| Platform pie | `platform` WS message | `nexus:platform:breakdown` |
+| Health bars | `health` WS message | `nexus:health:current` |
+| Geo header | `geo` WS message | `nexus:geo:header` |
+| Alerts table | `alert` WS message | `nexus:alert:rules`, `nexus:alert:summary` |
