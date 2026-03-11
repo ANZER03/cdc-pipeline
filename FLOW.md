@@ -115,12 +115,12 @@ Two Spark workers are registered with the standalone master at `spark://spark-ma
 | `nexus-spark-worker` | auto-detected (~10) | auto-detected (~14.6 GiB) | http://localhost:8091 |
 | `nexus-spark-worker-2` | auto-detected (~10) | auto-detected (~14.6 GiB) | http://localhost:8092 |
 
-Each of the three Spark job containers submits to the cluster with `--total-executor-cores 6` and a 30-second trigger interval. Trigger intervals are defined in [`src/streaming/config.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/config.py):
+Each of the three Spark job containers submits to the cluster with `--total-executor-cores 6` and a 10-second trigger interval. Trigger intervals are defined in [`src/streaming/config.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/config.py):
 
 ```
-TRIGGER_TRANSACTIONS    = "30 seconds"
-TRIGGER_INFRASTRUCTURE  = "30 seconds"
-TRIGGER_DERIVED         = "30 seconds"
+TRIGGER_TRANSACTIONS    = "10 seconds"
+TRIGGER_INFRASTRUCTURE  = "10 seconds"
+TRIGGER_DERIVED         = "10 seconds"
 ```
 
 Each job's Spark Driver UI is accessible at:
@@ -410,7 +410,7 @@ The main operational issues fixed during this migration:
 - **Writer schema mismatch**: Inline Avro schemas had name/namespace mismatches with the schemas registered by Debezium. Fixed by fetching the writer schema from Schema Registry at startup using `urllib.request`.
 - **`Redefining watermark is disallowed`** (Spark 3.3+): `read_cdc_stream` / `read_direct_stream` were calling `.withWatermark()` at the source level, and aggregators were calling it again after union. Fixed by removing all watermark calls from source readers.
 - **Shared DataFrame instances**: Passing the same `orders` / `request_log` DataFrame to multiple streaming queries caused Spark to see duplicate watermark definitions on the same logical plan. Fixed by creating independent stream instances per query.
-- **`ProcessingTimeExecutor: Current batch is falling behind`**: Caused by single executor core shared across four streaming queries + `startingOffsets=earliest` draining 1000–1500 messages on first batch. Fixed by switching CDC streams to `latest`, raising trigger intervals from 10s to 30s, adding a second Spark worker, and allocating 6 executor cores per job (2 executors × 3 cores each). Workers are uncapped so they auto-detect all host resources.
+- **`ProcessingTimeExecutor: Current batch is falling behind`**: Caused by single executor core shared across four streaming queries + `startingOffsets=earliest` draining 1000–1500 messages on first batch. Fixed by switching CDC streams to `latest`, raising trigger intervals from 10s to 30s temporarily (now reduced back to 10s after capacity increase), adding a second Spark worker, and allocating 6 executor cores per job (2 executors × 3 cores each). Workers are uncapped so they auto-detect all host resources.
 - **JDBC per-batch reads removed**: Original design read PostgreSQL on every Spark micro-batch for user/product dimension lookups. Replaced by fat-event denormalization — all dimension fields are embedded at write time in the generator.
 
 ## Practical Runtime Summary
@@ -433,9 +433,9 @@ sequenceDiagram
     DBZ->>K: CDC events (Confluent Avro, writer schema in registry)
     Gen->>K: raw.request_log + raw.system_metrics
 
-    K->>STX: orders/user_events/request_log (latest offsets, 30s trigger)
-    K->>SINF: request_log/system_metrics (latest offsets, 30s trigger)
-    K->>SD: sessions (latest offsets, 30s trigger)
+    K->>STX: orders/user_events/request_log (latest offsets, 10s trigger)
+    K->>SINF: request_log/system_metrics (latest offsets, 10s trigger)
+    K->>SD: sessions (latest offsets, 10s trigger)
 
     STX->>K: aggregated.kpis
     STX->>R: kpi, alerts, activity, regions, flows
