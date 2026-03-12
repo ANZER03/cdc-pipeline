@@ -1,6 +1,6 @@
 # PLAN: Docker Compose Infrastructure for EBAP Architecture
 
-**Goal:** Update `test/docker-compose.yml` to implement the full EBAP architecture as defined in the diagram (`ebap_architecture.png`).
+**Goal:** Update `test/docker-compose.yml` to implement the full EBAP architecture as defined in the diagram (`nexus_architecture.png`).
 
 **Base images (matching current stack):**
 
