@@ -25,10 +25,6 @@ services:
       - kafka-1-data:/var/lib/kafka/data
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-1:9092 --list >/dev/null 2>&1"]
       interval: 5s
@@ -62,10 +58,6 @@ services:
       - kafka-2-data:/var/lib/kafka/data
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka-2:9093 --list >/dev/null 2>&1"]
       interval: 5s
@@ -86,10 +78,6 @@ services:
     entrypoint: ["bash", "/scripts/create-topics.sh"]
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     restart: "no"
 
   kafka-ui:
@@ -113,10 +101,6 @@ services:
         condition: service_healthy
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/api/clusters || exit 1"]
       interval: 10s
@@ -142,10 +126,6 @@ services:
         condition: service_started
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
       interval: 5s
@@ -169,10 +149,6 @@ services:
       - ./init-scripts/postgres/seed-postgres.sql:/docker-entrypoint-initdb.d/01-seed-postgres.sql:ro
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d nexus_db"]
       interval: 5s
@@ -196,16 +172,12 @@ services:
       - pgadmin-data:/var/lib/pgadmin
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost/misc/ping')\" || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 10
-    restart: unless-stopped
+    # restart: unless-stopped
 
   debezium-connect:
     build:
@@ -238,10 +210,6 @@ services:
         condition: service_healthy
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
       interval: 10s
@@ -262,10 +230,6 @@ services:
     entrypoint: ["sh", "/scripts/register-debezium.sh"]
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     restart: "no"
 
   redis:
@@ -279,10 +243,6 @@ services:
       - redis-data:/data
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping"]
       interval: 5s
@@ -304,10 +264,6 @@ services:
       SPARK_NO_DAEMONIZE: "true"
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
       interval: 10s
@@ -326,18 +282,12 @@ services:
       - "8091:8081"
     environment:
       SPARK_NO_DAEMONIZE: "true"
-      SPARK_WORKER_CORES: 1
-      SPARK_WORKER_MEMORY: 2g
       SPARK_WORKER_WEBUI_PORT: 8081
     depends_on:
       spark-master:
         condition: service_healthy
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081 || exit 1"]
       interval: 10s
@@ -356,18 +306,12 @@ services:
       - "8092:8081"
     environment:
       SPARK_NO_DAEMONIZE: "true"
-      SPARK_WORKER_CORES: 1
-      SPARK_WORKER_MEMORY: 2g
       SPARK_WORKER_WEBUI_PORT: 8081
     depends_on:
       spark-master:
         condition: service_healthy
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081 || exit 1"]
       interval: 10s
@@ -407,11 +351,7 @@ services:
       - --name
       - nexus-transactions
       - --total-executor-cores
-      - "2"
-      - --executor-cores
-      - "1"
-      - --executor-memory
-      - 512M
+      - "6"
       - --conf
       - spark.ui.enabled=true
       - --conf
@@ -431,10 +371,6 @@ services:
       - /opt/nexus/src/streaming/jobs/transaction_analytics.py
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     restart: unless-stopped
 
   spark-job-infrastructure:
@@ -469,11 +405,7 @@ services:
       - --name
       - nexus-infrastructure
       - --total-executor-cores
-      - "2"
-      - --executor-cores
-      - "1"
-      - --executor-memory
-      - 512M
+      - "6"
       - --conf
       - spark.ui.enabled=true
       - --conf
@@ -493,10 +425,6 @@ services:
       - /opt/nexus/src/streaming/jobs/infrastructure_analytics.py
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     restart: unless-stopped
 
   spark-job-derived:
@@ -531,11 +459,7 @@ services:
       - --name
       - nexus-derived
       - --total-executor-cores
-      - "2"
-      - --executor-cores
-      - "1"
-      - --executor-memory
-      - 512M
+      - "6"
       - --conf
       - spark.ui.enabled=true
       - --conf
@@ -555,10 +479,6 @@ services:
       - /opt/nexus/src/streaming/jobs/derived_analytics.py
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     restart: unless-stopped
 
   nexus-api:
@@ -580,10 +500,6 @@ services:
         condition: service_healthy
     networks:
       - nexus-net
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

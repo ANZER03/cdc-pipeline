@@ -5,7 +5,16 @@
 .DEFAULT_GOAL := help
 .PHONY: help build up up-infra up-cdc up-spark up-api down logs restart \
         test-unit test-integration test-e2e lint format \
-        health clean generate-data logs-transactions logs-infrastructure logs-derived logs-api redis-cli redis-monitor
+        health clean generate-data generate generate-kafka generate-postgres generate-stress generate-light \
+        logs-transactions logs-infrastructure logs-derived logs-api redis-cli redis-monitor
+
+# ---------------------------------------------------------------------------
+# Generator variables (override on the command line, e.g. make generate RATE=50)
+# ---------------------------------------------------------------------------
+RATE     ?= 20
+DURATION ?= 300
+PRESET   ?= demo
+ERROR_RATE ?= 0.05
 
 # ---------------------------------------------------------------------------
 # Docker image
@@ -69,10 +78,25 @@ format:  ## Auto-format src/ and tests/ with ruff
 # ---------------------------------------------------------------------------
 
 health:  ## Check health of Nexus services
-	python scripts/health_check.py
+	python3 scripts/health_check.py
 
-generate-data:  ## Generate Nexus CDC + Kafka test traffic
-	python scripts/generate_test_data.py --mode all --rate 10 --duration 300
+generate-data:  ## Generate Nexus CDC + Kafka test traffic (legacy alias)
+	python3 scripts/generate_test_data.py --mode all --rate $(RATE) --duration $(DURATION) --error-rate $(ERROR_RATE)
+
+generate:  ## Generate CDC + Kafka traffic (mode=all). Supports RATE=, DURATION=, PRESET=, ERROR_RATE=
+	python3 scripts/generate_test_data.py --mode all --rate $(RATE) --duration $(DURATION) --preset $(PRESET) --error-rate $(ERROR_RATE)
+
+generate-kafka:  ## Generate Kafka-only traffic. Supports RATE=, DURATION=, PRESET=, ERROR_RATE=
+	python3 scripts/generate_test_data.py --mode kafka --rate $(RATE) --duration $(DURATION) --preset $(PRESET) --error-rate $(ERROR_RATE)
+
+generate-postgres:  ## Generate PostgreSQL/CDC-only traffic. Supports RATE=, DURATION=, PRESET=, ERROR_RATE=
+	python3 scripts/generate_test_data.py --mode postgres --rate $(RATE) --duration $(DURATION) --preset $(PRESET) --error-rate $(ERROR_RATE)
+
+generate-stress:  ## Stress test at 1000 cycles/s (32 workers) for 3 minutes
+	python3 scripts/generate_test_data.py --mode all --preset extreme
+
+generate-light:  ## Light traffic for quick smoke tests (5 req/s, 2 min)
+	python3 scripts/generate_test_data.py --mode all --preset light
 
 logs-transactions:  ## Tail transaction job logs
 	docker compose logs -f spark-job-transactions

@@ -112,15 +112,15 @@ Two Spark workers are registered with the standalone master at `spark://spark-ma
 
 | Container | Cores | Memory | Web UI (host) |
 |---|---|---|---|
-| `nexus-spark-worker` | 4 | 2 GB | http://localhost:8091 |
-| `nexus-spark-worker-2` | 4 | 2 GB | http://localhost:8092 |
+| `nexus-spark-worker` | auto-detected (~10) | auto-detected (~14.6 GiB) | http://localhost:8091 |
+| `nexus-spark-worker-2` | auto-detected (~10) | auto-detected (~14.6 GiB) | http://localhost:8092 |
 
-Each of the three Spark job containers submits to the cluster with `--total-executor-cores 2` and a 30-second trigger interval. Trigger intervals are defined in [`src/streaming/config.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/config.py):
+Each of the three Spark job containers submits to the cluster with `--total-executor-cores 6` and a 10-second trigger interval. Trigger intervals are defined in [`src/streaming/config.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/streaming/config.py):
 
 ```
-TRIGGER_TRANSACTIONS    = "30 seconds"
-TRIGGER_INFRASTRUCTURE  = "30 seconds"
-TRIGGER_DERIVED         = "30 seconds"
+TRIGGER_TRANSACTIONS    = "10 seconds"
+TRIGGER_INFRASTRUCTURE  = "10 seconds"
+TRIGGER_DERIVED         = "10 seconds"
 ```
 
 Each job's Spark Driver UI is accessible at:
@@ -359,24 +359,29 @@ Snapshot routes:
 SSE route:
 - [`src/api/routes/events.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/api/routes/events.py)
 
+WebSocket route:
+- [`src/api/routes/ws.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/api/routes/ws.py)
+
 Redis reader/parsing:
 - [`src/api/services/redis_service.py`](/home/anouar_zerrik1/projects/cdc-pipeline-feature-debezium-mode-worktree/src/api/services/redis_service.py)
 
-SSE mapping:
+WebSocket push mapping (dashboard uses `ws://localhost:8000/ws`):
 
 ```mermaid
 flowchart LR
-    R[(Redis Pub/Sub)] --> SSE[SSEManager]
-    SSE --> E1[event: kpi]
-    SSE --> E2[event: traffic]
-    SSE --> E3[event: activity]
-    SSE --> E4[event: regions]
-    SSE --> E5[event: flows]
-    SSE --> E6[event: alert]
-    SSE --> E7[event: platform]
-    SSE --> E8[event: health]
-    SSE --> E9[event: geo]
+    R[(Redis Pub/Sub)] --> WS[WSManager]
+    WS --> E1[type: kpi]
+    WS --> E2[type: traffic]
+    WS --> E3[type: activity]
+    WS --> E4[type: regions]
+    WS --> E5[type: flows]
+    WS --> E6[type: alert]
+    WS --> E7[type: platform]
+    WS --> E8[type: health]
+    WS --> E9[type: geo]
 ```
+
+Each message is a JSON frame: `{"type": "<event_type>", "data": {...}}`. On connect, the API immediately sends a full snapshot of all 9 types before switching to incremental pub/sub pushes.
 
 Client-facing endpoints:
 
@@ -389,7 +394,8 @@ Client-facing endpoints:
 - `GET /api/platform`
 - `GET /api/health`
 - `GET /api/geo`
-- `GET /events`
+- `GET /events` (SSE — exists in API but dashboard uses WebSocket)
+- `GET /ws` (WebSocket — used by dashboard)
 
 Test UIs:
 
@@ -404,7 +410,7 @@ The main operational issues fixed during this migration:
 - **Writer schema mismatch**: Inline Avro schemas had name/namespace mismatches with the schemas registered by Debezium. Fixed by fetching the writer schema from Schema Registry at startup using `urllib.request`.
 - **`Redefining watermark is disallowed`** (Spark 3.3+): `read_cdc_stream` / `read_direct_stream` were calling `.withWatermark()` at the source level, and aggregators were calling it again after union. Fixed by removing all watermark calls from source readers.
 - **Shared DataFrame instances**: Passing the same `orders` / `request_log` DataFrame to multiple streaming queries caused Spark to see duplicate watermark definitions on the same logical plan. Fixed by creating independent stream instances per query.
-- **`ProcessingTimeExecutor: Current batch is falling behind`**: Caused by single executor core shared across four streaming queries + `startingOffsets=earliest` draining 1000–1500 messages on first batch. Fixed by switching CDC streams to `latest`, raising trigger intervals from 10s to 30s, adding a second Spark worker (4 cores), and allocating 2 executor cores per job.
+- **`ProcessingTimeExecutor: Current batch is falling behind`**: Caused by single executor core shared across four streaming queries + `startingOffsets=earliest` draining 1000–1500 messages on first batch. Fixed by switching CDC streams to `latest`, raising trigger intervals from 10s to 30s temporarily (now reduced back to 10s after capacity increase), adding a second Spark worker, and allocating 6 executor cores per job (2 executors × 3 cores each). Workers are uncapped so they auto-detect all host resources.
 - **JDBC per-batch reads removed**: Original design read PostgreSQL on every Spark micro-batch for user/product dimension lookups. Replaced by fat-event denormalization — all dimension fields are embedded at write time in the generator.
 
 ## Practical Runtime Summary
@@ -420,16 +426,16 @@ sequenceDiagram
     participant SD as Spark Derived
     participant R as Redis
     participant API as FastAPI
-    participant UI as Monitor/Dashboard
+    participant UI as Dashboard
 
     Gen->>PG: insert rows (fat events with all dimension fields)
     PG->>DBZ: WAL changes
     DBZ->>K: CDC events (Confluent Avro, writer schema in registry)
     Gen->>K: raw.request_log + raw.system_metrics
 
-    K->>STX: orders/user_events/request_log (latest offsets, 30s trigger)
-    K->>SINF: request_log/system_metrics (latest offsets, 30s trigger)
-    K->>SD: sessions (latest offsets, 30s trigger)
+    K->>STX: orders/user_events/request_log (latest offsets, 10s trigger)
+    K->>SINF: request_log/system_metrics (latest offsets, 10s trigger)
+    K->>SD: sessions (latest offsets, 10s trigger)
 
     STX->>K: aggregated.kpis
     STX->>R: kpi, alerts, activity, regions, flows
@@ -438,5 +444,5 @@ sequenceDiagram
 
     R->>API: snapshot reads
     R->>API: pub/sub events
-    API->>UI: REST snapshot + SSE incremental updates
+    API->>UI: REST snapshot + WebSocket incremental updates (ws://localhost:8000/ws)
 ```

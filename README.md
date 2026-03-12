@@ -1,61 +1,63 @@
-# Spark with Kafka & Iceberg (KRaft Mode)
+# Nexus CDC Pipeline
 
-This project provides a custom Spark Docker image pre-configured with Apache Iceberg and Kafka connectors, along with a KRaft-mode Kafka orchestration for end-to-end testing.
+Real-time e-commerce analytics pipeline built on Change Data Capture. PostgreSQL row changes are captured by Debezium, streamed through Kafka, aggregated by three Spark Structured Streaming jobs, and served from Redis via a FastAPI WebSocket endpoint to the [Nexus Dashboard](../nexus-dash/e-commerce-nexus-dashboard/).
 
-## 1. Spark Image Details
-- **Base Image**: `apache/spark:3.5.3`
-- **Scala Version**: `2.12`
-- **Connectors Included**:
-    - **Iceberg**: `iceberg-spark-runtime-3.5_2.12:1.7.1`
-    - **Kafka**: `spark-sql-kafka-0-10_2.12:3.5.3`
-    - **MinIO/S3**: `hadoop-aws:3.3.4` and `aws-java-sdk-bundle:1.12.262`
+See [`FLOW.md`](FLOW.md) for full architecture details, data flow diagrams, and operational notes.
 
-## 2. Infrastructure
-The setup uses a multi-container orchestration:
-- **Kafka**: KRaft mode (`confluentinc/cp-kafka:7.7.7`).
-- **MinIO**: Object storage for S3A testing (`minio/minio:latest`).
+## Stack
 
-## 3. Verification Test
-The `test_connectors.py` script performs end-to-end checks:
-1.  **Iceberg**: Creates a Hadoop-catalog based table, inserts a record, and verifies the read.
-2.  **Kafka**: Produces a sample record to `test-topic` and consumes it back.
-3.  **MinIO (S3A)**: Writes a Parquet file to `s3a://spark-test/` and reads it back.
-4.  **Iceberg on MinIO**: (via `test_iceberg_minio.py`) Specifically verifies writing Iceberg tables directly to the MinIO bucket.
+| Component | Technology |
+|---|---|
+| Source database | PostgreSQL 16 |
+| CDC connector | Debezium 2.x (Kafka Connect) |
+| Schema registry | Confluent Schema Registry |
+| Message broker | Kafka (KRaft mode) |
+| Stream processing | Apache Spark 3.5 Structured Streaming (3 jobs) |
+| State store | Redis 7 |
+| API | FastAPI (REST snapshots + WebSocket push) |
 
-## 4. How to Run
+## Quick Start
 
-### Build the Image
+Start the full stack:
+
 ```bash
-docker build -t custom-spark:latest ./test
+docker compose up -d
 ```
 
-### Run the Integration Test
-1. Start infrastructure:
+Once all services are healthy, start the data generator:
+
 ```bash
-cd test
-docker compose up -d kafka minio
-```
-2. Create the test bucket:
-```bash
-docker run --rm --network test_default minio/mc alias set myminio http://minio:9000 minioadmin minioadmin
-docker run --rm --network test_default minio/mc mb myminio/spark-test
-```
-3. Run the complete connector test:
-```bash
-docker compose up spark --abort-on-container-exit
+docker compose exec nexus-data-generator python generate_test_data.py --preset demo
 ```
 
-4. Run the specific Iceberg-MinIO write test:
+The pipeline is live when all 12 Redis keys are populated. You can verify:
+
 ```bash
-docker run --rm --network test_default \
-  -v $(pwd)/test/test_iceberg_minio.py:/test/test_iceberg_minio.py \
-  custom-spark:latest \
-  /opt/spark/bin/spark-submit /test/test_iceberg_minio.py
+docker compose exec nexus-redis redis-cli keys "nexus:*"
 ```
 
-## 5. Clean up
-To remove the environment and volumes:
+## Service Ports
+
+| Service | URL |
+|---|---|
+| Kafka UI | http://localhost:8084 |
+| Spark Master UI | http://localhost:8080 |
+| Spark Worker 1 UI | http://localhost:8091 |
+| Spark Worker 2 UI | http://localhost:8092 |
+| Spark Job: nexus-transactions | http://localhost:4040 |
+| Spark Job: nexus-infrastructure | http://localhost:4041 |
+| Spark Job: nexus-derived | http://localhost:4042 |
+| FastAPI (REST + WebSocket) | http://localhost:8000 |
+| Redis | localhost:6379 |
+
+## API Endpoints
+
+The dashboard connects via WebSocket at `ws://localhost:8000/ws`. On connect it receives a full snapshot of all 9 data types, then incremental updates as Redis pub/sub fires.
+
+REST snapshot endpoints are also available at `/api/metrics`, `/api/traffic`, `/api/activities`, `/api/regions`, `/api/flows`, `/api/alerts`, `/api/platform`, `/api/health`, and `/api/geo`.
+
+## Tear Down
+
 ```bash
 docker compose down -v
 ```
-
