@@ -1,92 +1,180 @@
-"""
-kafka_sources.py
-EBAP Streaming — Kafka source stream readers.
+"""Kafka stream readers for Nexus topics."""
 
-Provides two streaming DataFrame readers:
-  - read_events_stream: raw user events from ebap.events.raw
-  - read_cdc_users_stream: CDC user profile changes from ebap.cdc.users
-"""
+from __future__ import annotations
 
-from pyspark.sql import SparkSession, DataFrame
+import json
+import logging
+import urllib.request
+
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType
+from pyspark.sql.avro.functions import from_avro
+from pyspark.sql.types import StructType
 
-from config import KAFKA_BROKERS, TOPIC_EVENTS_RAW, TOPIC_CDC_USERS
-from schemas import EVENT_SCHEMA, CDC_ENVELOPE_SCHEMA
+from streaming.config import (
+    KAFKA_BROKERS,
+    POSTGRES_DB,
+    POSTGRES_HOST,
+    POSTGRES_PASSWORD,
+    POSTGRES_PORT,
+    POSTGRES_USER,
+    SCHEMA_REGISTRY_URL,
+    TOPIC_AGGREGATED_KPIS,
+    TOPIC_CDC_CART_ITEMS,
+    TOPIC_CDC_ORDERS,
+    TOPIC_CDC_PRODUCTS,
+    TOPIC_CDC_SESSIONS,
+    TOPIC_CDC_USER_EVENTS,
+    TOPIC_CDC_USERS,
+    TOPIC_RAW_REQUEST_LOG,
+    TOPIC_RAW_SYSTEM_METRICS,
+)
+from streaming.schemas import (
+    KPI_SNAPSHOT_SCHEMA,
+    REQUEST_LOG_AVRO_SCHEMA,
+    SYSTEM_METRICS_AVRO_SCHEMA,
+)
+
+log = logging.getLogger("nexus.kafka_sources")
 
 
-def read_events_stream(spark: SparkSession) -> DataFrame:
+def _fetch_schema_from_registry(subject: str) -> str:
+    """Fetch the latest Avro schema string for a subject from Schema Registry.
+
+    Using the writer schema directly avoids name/namespace mismatches that cause
+    spark-avro (PERMISSIVE mode) to return NULL for every record.
     """
-    Read raw user events from ebap.events.raw.
-    Returns a parsed DataFrame with typed columns + event_ts (TimestampType).
-    """
-    raw = (
-        spark.readStream
-        .format("kafka")
+    url = f"{SCHEMA_REGISTRY_URL}/subjects/{subject}/versions/latest"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
+    schema_str = data["schema"]
+    log.info("Fetched Avro schema for subject %s from Schema Registry", subject)
+    return schema_str
+
+
+def _read_kafka_stream(spark: SparkSession, topic: str, starting_offsets: str) -> DataFrame:
+    return (
+        spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BROKERS)
-        .option("subscribe", TOPIC_EVENTS_RAW)
-        .option("startingOffsets", "latest")
+        .option("subscribe", topic)
+        .option("startingOffsets", starting_offsets)
         .option("failOnDataLoss", "false")
         .load()
     )
 
-    parsed = (
-        raw
-        .select(F.col("value").cast("string").alias("raw_json"))
-        .select(F.from_json(F.col("raw_json"), EVENT_SCHEMA).alias("e"))
-        .select(
-            F.col("e.id").alias("event_id"),
-            F.col("e.user_id"),
-            F.col("e.action"),
-            F.col("e.metadata"),
-            F.col("e.location"),
-            # Parse ISO-8601 timestamp string → TimestampType
-            F.to_timestamp(F.col("e.timestamp")).alias("event_ts"),
-        )
-        # Extract common metadata fields
-        .withColumn("amount",  F.col("metadata").getItem("amount").cast(DoubleType()))
-        .withColumn("item_id", F.col("metadata").getItem("item_id"))
-        .drop("metadata")
-        # Filter out nulls from malformed messages
-        .filter(F.col("event_id").isNotNull() & F.col("user_id").isNotNull())
-        # Watermark — tolerate up to 10 minutes of late data
-        .withWatermark("event_ts", "10 minutes")
+
+def _from_avro_options() -> dict[str, str]:
+    return {"mode": "PERMISSIVE"}
+
+
+def _strip_schema_registry_header(column: str = "value"):
+    # Confluent Avro payloads store a 5-byte wire header before the Avro bytes.
+    return F.expr(f"substring({column}, 6, length({column}) - 5)")
+
+
+def read_cdc_stream(
+    spark: SparkSession, topic: str, avro_schema: str, timestamp_column: str
+) -> DataFrame:
+    raw = _read_kafka_stream(spark, topic, "latest")
+    parsed = raw.select(
+        from_avro(_strip_schema_registry_header(), avro_schema, _from_avro_options()).alias("data")
     )
-    return parsed
+    # In PERMISSIVE mode, failed rows have data=null. Filter them out.
+    result = (
+        parsed.filter(F.col("data").isNotNull())
+        .select("data.*")
+        .filter(F.col("__op").isin("c", "u", "r"))
+    )
+    # Debezium encodes TIMESTAMPTZ as ISO-8601 strings (ZonedTimestamp).
+    # Use to_timestamp with explicit format (6-digit microseconds + literal Z suffix).
+    # NOTE: withWatermark is intentionally NOT applied here — each consumer applies its own
+    # watermark after unioning multiple streams, to avoid "Redefining watermark" errors.
+    return result.withColumn(
+        timestamp_column,
+        F.coalesce(
+            F.to_timestamp(F.col(timestamp_column), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'"),
+            F.to_timestamp(F.col(timestamp_column), "yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            F.to_timestamp(F.col(timestamp_column)),
+        ),
+    )
 
 
-def read_cdc_users_stream(spark: SparkSession) -> DataFrame:
-    """
-    Read CDC user profile changes from ebap.cdc.users.
-    Extracts the 'after' image (current row state) from the Debezium envelope.
-    Returns user profile fields keyed on user_id.
-    """
-    raw = (
-        spark.readStream
-        .format("kafka")
-        .option("kafka.bootstrap.servers", KAFKA_BROKERS)
-        .option("subscribe", TOPIC_CDC_USERS)
-        .option("startingOffsets", "earliest")   # bootstrap full snapshot
-        .option("failOnDataLoss", "false")
+def read_direct_stream(
+    spark: SparkSession, topic: str, avro_schema: str, timestamp_column: str
+) -> DataFrame:
+    raw = _read_kafka_stream(spark, topic, "latest")
+    parsed = raw.select(
+        from_avro(_strip_schema_registry_header(), avro_schema, _from_avro_options()).alias("data")
+    )
+    # NOTE: withWatermark is intentionally NOT applied here — consumers apply their own.
+    return parsed.select("data.*").withColumn(
+        timestamp_column,
+        F.coalesce(
+            F.to_timestamp(F.col(timestamp_column), "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'"),
+            F.to_timestamp(F.col(timestamp_column), "yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            F.to_timestamp(F.col(timestamp_column)),
+        ),
+    )
+
+
+def read_users(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_USERS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_USERS, schema, "updated_at")
+
+
+def read_products(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_PRODUCTS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_PRODUCTS, schema, "updated_at")
+
+
+def read_orders(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_ORDERS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_ORDERS, schema, "updated_at")
+
+
+def read_cart_items(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_CART_ITEMS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_CART_ITEMS, schema, "added_at")
+
+
+def read_user_events(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_USER_EVENTS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_USER_EVENTS, schema, "created_at")
+
+
+def read_sessions(spark: SparkSession) -> DataFrame:
+    schema = _fetch_schema_from_registry(f"{TOPIC_CDC_SESSIONS}-value")
+    return read_cdc_stream(spark, TOPIC_CDC_SESSIONS, schema, "started_at")
+
+
+def read_request_log(spark: SparkSession) -> DataFrame:
+    return read_direct_stream(spark, TOPIC_RAW_REQUEST_LOG, REQUEST_LOG_AVRO_SCHEMA, "created_at")
+
+
+def read_system_metrics(spark: SparkSession) -> DataFrame:
+    return read_direct_stream(
+        spark, TOPIC_RAW_SYSTEM_METRICS, SYSTEM_METRICS_AVRO_SCHEMA, "recorded_at"
+    )
+
+
+def read_aggregated_kpis(spark: SparkSession) -> DataFrame:
+    return _read_json_stream(spark, TOPIC_AGGREGATED_KPIS, KPI_SNAPSHOT_SCHEMA)
+
+
+def _read_json_stream(spark: SparkSession, topic: str, schema: StructType) -> DataFrame:
+    raw = _read_kafka_stream(spark, topic, "latest")
+    return raw.select(F.from_json(F.col("value").cast("string"), schema).alias("data")).select(
+        "data.*"
+    )
+
+
+def read_postgres_table_snapshot(spark: SparkSession, table_name: str) -> DataFrame:
+    return (
+        spark.read.format("jdbc")
+        .option("url", f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}")
+        .option("dbtable", table_name)
+        .option("user", POSTGRES_USER)
+        .option("password", POSTGRES_PASSWORD)
+        .option("driver", "org.postgresql.Driver")
         .load()
     )
-
-    parsed = (
-        raw
-        .select(F.col("value").cast("string").alias("raw_json"))
-        .select(F.from_json(F.col("raw_json"), CDC_ENVELOPE_SCHEMA).alias("cdc"))
-        .select(
-            F.col("cdc.payload.after.user_id").alias("user_id"),
-            F.col("cdc.payload.after.name").alias("user_name"),
-            F.col("cdc.payload.after.plan").alias("plan"),
-            F.col("cdc.payload.after.region").alias("region"),
-            F.col("cdc.payload.op").alias("cdc_op"),
-        )
-        # Only keep inserts (op=r snapshot, op=c create, op=u update) — ignore deletes
-        .filter(F.col("cdc_op").isin("r", "c", "u"))
-        .filter(F.col("user_id").isNotNull())
-        # Use current_timestamp as a proxy event time for watermark on CDC stream
-        .withColumn("cdc_ts", F.current_timestamp())
-        .withWatermark("cdc_ts", "10 minutes")
-    )
-    return parsed

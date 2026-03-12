@@ -36,6 +36,7 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+.venv/
 
 # Docker Compose local overrides
 docker-compose.override.yml

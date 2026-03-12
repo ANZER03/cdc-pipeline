@@ -1,11 +1,4 @@
-"""
-conftest.py
-EBAP — Shared pytest fixtures for all test tiers.
-
-Provides:
-  - spark: a local SparkSession for unit/integration tests
-  - Any future shared mocks (Redis, Kafka, etc.)
-"""
+"""Shared pytest fixtures for Nexus tests."""
 
 import pytest
 
@@ -19,9 +12,8 @@ def spark():
     from pyspark.sql import SparkSession
 
     spark = (
-        SparkSession.builder
-        .master("local[2]")
-        .appName("ebap-tests")
+        SparkSession.builder.master("local[2]")
+        .appName("nexus-tests")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
         .getOrCreate()

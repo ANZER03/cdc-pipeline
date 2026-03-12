@@ -58,3 +58,4 @@ To remove the environment and volumes:
 ```bash
 docker compose down -v
 ```
+
